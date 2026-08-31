@@ -16,7 +16,7 @@
 
   <!-- طبقة التوكنز — تُحمَّل قبل styles.css (راجع library/docbook-design-upgrade.md) -->
   <link rel="stylesheet" href="tokens.css?v=1">
-  <link rel="stylesheet" href="styles.css?v=273">
+  <link rel="stylesheet" href="styles.css?v=274">
 
   <!-- منع ومضة الصفحة الرئيسية قبل شاشة الإعداد — يُنفَّذ في الـhead قبل أول رسم.
        يُخفى محتوى التطبيق فوراً إن كان الحساب يحتاج إعداداً (حسب المخزّن المحلي)،
@@ -1499,55 +1499,20 @@
   </div>
 
   <div id="dentalChartModal" class="hidden fixed inset-0 z-[190] dc-page">
-    <div class="dc-page-head">
-      <button onclick="closeDentalChart()" class="dc-back" title="رجوع"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg></button>
-      <span class="dc-head-ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5.5c-1.6-1.8-4.1-2.3-6-1.1C4.1 5.6 3.5 7.9 4.2 9.9c.8 2.1 1.2 4.3 1.4 6.5.15 1.6.4 3.2 1.2 4.6.4.75 1.5.8 2 .1.8-1.2 1.1-2.7 1.5-4.1.3-1.1 1.9-1.1 2.2 0 .4 1.4.7 2.9 1.5 4.1.5.7 1.6.65 2-.1.8-1.4 1.05-3 1.2-4.6.2-2.2.6-4.4 1.4-6.5.7-2 .1-4.3-1.8-5.5-1.9-1.2-4.4-.7-6 1.1z"/></svg></span>
-      <div class="dc-head-txt">
-        <h3>مخطط الأسنان</h3>
-        <p id="dcPatientName"></p>
-      </div>
-      <div id="dcViewToggleWrap" class="dc-head-toggle">
-        <div class="sched-toggle">
-          <button id="dcViewBtnArch" onclick="dcSetView('arch')"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 16c0-6 3.6-10 8-10s8 4 8 10"/></svg> قوس</button>
-          <button id="dcViewBtnRows" onclick="dcSetView('rows')"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M3 9h18M3 15h18"/></svg> صفوف</button>
-        </div>
-      </div>
-    </div>
     <div class="dc-page-body">
-      <div class="dc-page-main">
-        <div id="dcSummary" class="dc-card dc-summary"></div>
-        <div id="dcRowsView">
-          <div class="dc-card">
-            <div class="dc-jaw-label">الفك العلوي</div>
-            <!-- العرف السريري: يمين المريض على يسار الشاشة -->
-            <div class="dc-row-wrap"><span class="dc-side">يسار</span><div class="dc-teeth-row" id="dcUpperRow"></div><span class="dc-side">يمين</span></div>
-            <div class="dc-midline">— خط الوسط —</div>
-            <div class="dc-row-wrap"><span class="dc-side">يسار</span><div class="dc-teeth-row" id="dcLowerRow"></div><span class="dc-side">يمين</span></div>
-            <div class="dc-jaw-label">الفك السفلي</div>
-          </div>
+
+      <!-- لوحة الأدوات (جهة الريل) -->
+      <aside class="dc-tools" id="toothPanel">
+        <div class="dc-tools-head">
+          <button onclick="closeDentalChart()" class="dc-back2" title="رجوع">رجوع</button>
+          <div class="dc-pt-name" id="dcPatientName"></div>
         </div>
-        <div id="dcArchView" class="hidden">
-          <div class="dc-card">
-            <div class="dc-arch-layout">
-              <div class="dc-arch-col">
-                <div class="dc-jaw-label">الفك العلوي</div>
-                <div class="dc-arch" id="dcArch"></div>
-                <div class="dc-jaw-label">الفك السفلي</div>
-              </div>
-              <div class="dc-arch-legend">
-                <div class="dc-arch-legend-title">دليل الألوان</div>
-                <div id="dcLegend" class="dc-legend-wrap"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <aside id="toothPanel" class="dc-tooth-panel">
+
         <div id="teEmpty" class="te-empty">
-          <svg viewBox="0 0 24 24" width="46" height="46" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="opacity:.35;"><path d="M12 5.5c-1.6-1.8-4.1-2.3-6-1.1C4.1 5.6 3.5 7.9 4.2 9.9c.8 2.1 1.2 4.3 1.4 6.5.15 1.6.4 3.2 1.2 4.6.4.75 1.5.8 2 .1.8-1.2 1.1-2.7 1.5-4.1.3-1.1 1.9-1.1 2.2 0 .4 1.4.7 2.9 1.5 4.1.5.7 1.6.65 2-.1.8-1.4 1.05-3 1.2-4.6.2-2.2.6-4.4 1.4-6.5.7-2 .1-4.3-1.8-5.5-1.9-1.2-4.4-.7-6 1.1z"/></svg>
+          <svg viewBox="0 0 24 24" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="opacity:.35;"><path d="M12 5.5c-1.6-1.8-4.1-2.3-6-1.1C4.1 5.6 3.5 7.9 4.2 9.9c.8 2.1 1.2 4.3 1.4 6.5.15 1.6.4 3.2 1.2 4.6.4.75 1.5.8 2 .1.8-1.2 1.1-2.7 1.5-4.1.3-1.1 1.9-1.1 2.2 0 .4 1.4.7 2.9 1.5 4.1.5.7 1.6.65 2-.1.8-1.4 1.05-3 1.2-4.6.2-2.2.6-4.4 1.4-6.5.7-2 .1-4.3-1.8-5.5-1.9-1.2-4.4-.7-6 1.1z"/></svg>
           <p>اضغط على أي سن في المخطط<br>لتسجيل حالته</p>
         </div>
-        <div id="teEditor" class="dc-card te-editor" style="display:none;">
+        <div id="teEditor" class="te-editor" style="display:none;">
           <div class="te-panel-head">
             <div style="min-width:0;">
               <div class="te-panel-title" id="teTitle">السن</div>
@@ -1568,13 +1533,48 @@
           <div style="display:none;"><input type="date" id="teDate"><input type="text" id="teNote"><span id="teTlCount"></span><div id="teHistory"></div></div>
           <button class="te-fl-save" onclick="saveToothEdit()"><i class="fas fa-check"></i> تسجيل الحالة</button>
         </div>
-      </aside>
-      <aside class="dc-page-side">
-        <div class="dc-card" style="grid-column:1/-1;">
-          <h4 class="dc-card-title"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg> سجل الأحداث <span id="dcEventsCount" class="dc-count"></span></h4>
+
+        <div class="dc-sec">
+          <div class="dc-sec-lb">دليل الألوان</div>
+          <div id="dcLegend" class="dc-legend-wrap"></div>
+        </div>
+
+        <div class="dc-sec">
+          <div class="dc-sec-lb">سجل الأحداث <span id="dcEventsCount" class="dc-count"></span></div>
           <div id="dcEventsList" class="dc-events-list"></div>
         </div>
+
+        <div class="dc-sec">
+          <div class="dc-sec-lb">الحالة</div>
+          <div id="dcSummary" class="dc-summary"></div>
+        </div>
       </aside>
+
+      <!-- مسرح المخطّط -->
+      <div class="dc-stage">
+        <div id="dcViewToggleWrap" class="dc-stage-toggle">
+          <div class="sched-toggle">
+            <button id="dcViewBtnArch" onclick="dcSetView('arch')"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 16c0-6 3.6-10 8-10s8 4 8 10"/></svg> قوس</button>
+            <button id="dcViewBtnRows" onclick="dcSetView('rows')"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M3 9h18M3 15h18"/></svg> صفوف</button>
+          </div>
+        </div>
+        <div class="dc-stage-scroll">
+          <div id="dcRowsView">
+            <div class="dc-jaw-label">الفك العلوي</div>
+            <!-- العرف السريري: يمين المريض على يسار الشاشة -->
+            <div class="dc-row-wrap"><span class="dc-side">يسار</span><div class="dc-teeth-row" id="dcUpperRow"></div><span class="dc-side">يمين</span></div>
+            <div class="dc-midline">— خط الوسط —</div>
+            <div class="dc-row-wrap"><span class="dc-side">يسار</span><div class="dc-teeth-row" id="dcLowerRow"></div><span class="dc-side">يمين</span></div>
+            <div class="dc-jaw-label">الفك السفلي</div>
+          </div>
+          <div id="dcArchView" class="hidden">
+            <div class="dc-jaw-label">الفك العلوي</div>
+            <div class="dc-arch" id="dcArch"></div>
+            <div class="dc-jaw-label">الفك السفلي</div>
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 

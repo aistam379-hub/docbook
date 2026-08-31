@@ -2179,22 +2179,127 @@
 .dc-page-body{display:grid;grid-template-columns:1fr minmax(300px,360px);gap:14px;margin:0 auto;padding:16px;width:100%;align-items:start;}
 .dc-page-main{display:flex;flex-direction:column;gap:14px;min-width:0;}
 .dc-page-side{display:grid;grid-template-columns:minmax(260px,330px) 1fr;gap:14px;align-items:start;grid-column:1;min-width:0;}
-/* ═══ مخطّط الأسنان على اللابتوب — لوحة أدوات ثابتة العرض + مخطّط يملأ الباقي ═══ */
-@media (min-width:1025px){
-  #dentalChartModal .dc-page-body{
-    grid-template-columns:clamp(340px, 30%, 430px) 1fr;
-    grid-template-areas:"tools chart" "arch chart";
-    max-width:1720px;
+/* ═══════════════════════════════════════════════════════════════════
+   مخطّط الأسنان — شاشة مقسومة بلا هيدر (مرجع المستخدم):
+   لوحة أدوات ملوّنة خفيفة على جهة الريل + مسرح كبير يملأ الباقي.
+   محصور بـ #dentalChartModal — صفحتا العمليات/التقويم لا تتأثّران.
+   ═══════════════════════════════════════════════════════════════════ */
+#dentalChartModal.dc-page{ position:fixed; inset:0; overflow:hidden; background:var(--bg); }
+#dentalChartModal .dc-page-head{ display:none; }
+#dentalChartModal .dc-page-body{
+  display:flex; flex-direction:row;   /* RTL: أوّل عنصر (الأدوات) يقع يميناً = جهة الريل */
+  gap:0; padding:0; margin:0; max-width:none; width:100%; height:100dvh;
+  align-items:stretch;
+}
+
+/* ── لوحة الأدوات (جهة الريل العائم) ── */
+#dentalChartModal .dc-tools{
+  flex:0 0 clamp(320px, 27vw, 420px);
+  display:flex; flex-direction:column; gap:20px;
+  height:100dvh; overflow-y:auto; overscroll-behavior:contain;
+  padding:18px 100px 26px 18px;   /* يمين 100 لإخلاء الشريط العائم */
+  background:var(--primary-1);
+  border-inline-start:1px solid var(--o06);
+  position:static; top:auto;
+}
+#dentalChartModal .dc-tools-head{ display:flex; align-items:center; gap:10px; }
+#dentalChartModal .dc-back2{
+  flex-shrink:0; font-family:inherit; font-weight:800; font-size:.8rem;
+  padding:8px 15px; border-radius:10px; cursor:pointer;
+  background:var(--surface); border:1px solid var(--border-strong); color:var(--text-secondary);
+  transition:border-color .15s, color .15s;
+}
+#dentalChartModal .dc-back2:hover{ border-color:var(--primary); color:var(--primary); }
+#dentalChartModal .dc-pt-name{
+  font-size:.74rem; font-weight:700; color:var(--text-muted); line-height:1.4;
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+
+/* قسم بعنوان صغير خافت — لا بطاقة */
+#dentalChartModal .dc-sec{ display:flex; flex-direction:column; gap:10px; }
+#dentalChartModal .dc-sec-lb{
+  font-size:.66rem; font-weight:800; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--text-muted); display:flex; align-items:center; gap:6px;
+}
+#dentalChartModal .dc-sec .dc-count{ letter-spacing:0; text-transform:none; }
+
+/* محرّر السن داخل اللوحة — سطح فاتح خفيف بلا حدّ ثقيل */
+#dentalChartModal .te-editor{
+  background:var(--surface); border:1px solid var(--o06); border-radius:14px;
+  padding:14px; display:flex; flex-direction:column; gap:9px;
+}
+#dentalChartModal .te-empty{
+  background:var(--surface); border:1px dashed var(--border-strong); border-radius:14px;
+  padding:26px 14px; text-align:center; color:var(--text-muted);
+}
+#dentalChartModal .te-empty p{ font-size:.8rem; margin:8px 0 0; line-height:1.6; }
+
+#dentalChartModal .dc-events-list{
+  grid-template-columns:1fr; max-height:none; gap:7px; overflow:visible;
+}
+#dentalChartModal .dc-summary{
+  background:transparent; border:none; padding:0; justify-content:flex-start; gap:7px;
+}
+
+/* ── مسرح المخطّط ── */
+#dentalChartModal .dc-stage{
+  flex:1 1 auto; min-width:0; position:relative;
+  display:flex; align-items:center; justify-content:center;
+  background:
+    radial-gradient(130% 90% at 50% -10%, var(--primary-2) 0%, transparent 62%),
+    linear-gradient(180deg, var(--primary-2) 0%, var(--primary-1) 45%, var(--bg) 90%);
+  overflow:hidden;
+}
+#dentalChartModal .dc-stage-toggle{
+  position:absolute; top:16px; left:50%; transform:translateX(-50%); z-index:6;
+}
+#dentalChartModal .dc-stage-toggle .sched-toggle{
+  background:var(--surface); box-shadow:0 4px 16px -6px rgba(15,23,42,.22);
+}
+#dentalChartModal .dc-stage-toggle .sched-toggle button{ display:inline-flex; align-items:center; gap:5px; }
+#dentalChartModal .dc-stage-scroll{
+  width:100%; height:100%; overflow:auto;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:8px; padding:64px 24px 28px;
+}
+#dentalChartModal #dcRowsView,
+#dentalChartModal #dcArchView{
+  display:flex; flex-direction:column; align-items:center; gap:6px;
+  width:100%;
+}
+#dentalChartModal #dcArchView.hidden,
+#dentalChartModal #dcRowsView.hidden{ display:none; }
+#dentalChartModal .dc-arch{ height:min(78vh, 860px); max-width:100%; }
+#dentalChartModal .dc-teeth-row .dc-crown{ scale:1.18; }
+#dentalChartModal .dc-teeth-row{ gap:8px; padding:16px 4px; }
+
+/* ── الوضع الليلي: سلّم --primary-1/2 فاتح دائماً، فنعطي أسطحاً داكنة صريحة ── */
+body.theme-dark #dentalChartModal .dc-tools,
+:root[data-theme="dark"] #dentalChartModal .dc-tools{
+  background:#10201d;   /* داكن مائل للتركوازي */
+}
+body.theme-dark #dentalChartModal .dc-stage,
+:root[data-theme="dark"] #dentalChartModal .dc-stage{
+  background:
+    radial-gradient(130% 90% at 50% -10%, rgba(20,184,166,.16) 0%, transparent 60%),
+    linear-gradient(180deg, #12211f 0%, #101413 45%, var(--bg) 90%);
+}
+body.theme-dark #dentalChartModal .dc-stage-toggle .sched-toggle,
+:root[data-theme="dark"] #dentalChartModal .dc-stage-toggle .sched-toggle{
+  background:var(--surface); box-shadow:0 4px 18px -4px rgba(0,0,0,.6);
+}
+
+/* ── موبايل/تابلت: تتراص عموديّاً — المسرح فوق، الأدوات تحته ── */
+@media (max-width:1024px){
+  #dentalChartModal .dc-page-body{ flex-direction:column-reverse; height:100dvh; }
+  #dentalChartModal .dc-tools{
+    flex:1 1 auto; width:100%; height:auto; min-height:0;
+    padding:16px 16px 26px;
+    border-inline-start:none; border-top:1px solid var(--o06);
   }
-  #dentalChartModal .dc-page-main{grid-area:chart;}
-  #dentalChartModal .dc-tooth-panel{grid-area:tools;}
-  #dentalChartModal .dc-page-side{grid-area:arch;display:block;grid-column:auto;}
-  /* المخطّط أكبر: يستغلّ عمود الثلثين */
-  #dentalChartModal .dc-arch{ height:min(72vh, 760px); max-width:100%; }
-  #dentalChartModal .dc-teeth-row .dc-crown{ scale:1.15; }
-  #dentalChartModal .dc-teeth-row{ gap:7px; padding:14px 4px; }
-  /* الملخّص شريط رفيع لا بطاقة تأكل الارتفاع */
-  #dentalChartModal .dc-summary{ background:transparent; border:none; padding:2px 0 0; justify-content:flex-start; gap:8px; }
+  #dentalChartModal .dc-stage{ flex:0 0 54dvh; }
+  #dentalChartModal .dc-arch{ height:42dvh; }
+  #dentalChartModal .dc-stage-scroll{ padding:56px 14px 18px; }
 }
 /* الإشارات فوق المخطّط = بطاقات إحصاء موحّدة (نقطة + رقم كبير + تسمية) */
 #dentalChartModal .dc-sum-chip{
