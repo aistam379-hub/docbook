@@ -1,0 +1,8494 @@
+/* ===== PWA: تسجيل service worker (شبكة-أولاً) ===== */
+/* الكاش شبكة-أولاً فلا تظهر نسخة قديمة، والتسجيل ضروري لتثبيت التطبيق على أندرويد */
+if('serviceWorker'in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){});});}
+
+/* ===== Auth & Login ===== */
+    // ── شاشة "جارٍ التحقق" تمنع ظهور أي واجهة قبل اكتمال التحقق ──
+    var _verifyFallbackTimer = null;
+    // لا صفحة دخول — شاشة الدخول مخفية دائماً والتطبيق يفتح مباشرةً
+    function showVerifying() { var ov = document.getElementById('loginOverlay'); if (ov) ov.style.display = 'none'; }
+    function showLoginForm(msg) { var ov = document.getElementById('loginOverlay'); if (ov) ov.style.display = 'none'; }
+    showLoginForm();
+
+    // ── تسجيل الدخول عبر Firebase Auth + التحقق من الدور ──
+    function doLocalLogin() {
+      var email = document.getElementById('loginUser').value.trim();
+      var pass  = document.getElementById('loginPassword').value.trim();
+      var err   = document.getElementById('loginError');
+      var btn   = document.getElementById('loginBtn');
+
+      if (!email || !pass) {
+        err.style.display = 'block';
+        err.textContent = 'الرجاء إدخال البريد الإلكتروني وكلمة المرور';
+        return;
+      }
+      err.style.display = 'none';
+      btn.disabled = true; btn.textContent = 'جارٍ التحقق...';
+      showVerifying();
+
+      function tryLogin() {
+        window._fb.signIn(email, pass)
+          .then(function(cred) {
+            return _ensureRole(cred.user).then(function(role) {
+              if (role !== 'doctor') {
+                return window._fb.signOut().then(function() {
+                  btn.disabled = false; btn.textContent = 'تسجيل الدخول';
+                  showLoginForm('هذا الحساب غير مصرح له بالدخول هنا');
+                });
+              }
+              btn.disabled = false; btn.textContent = 'تسجيل الدخول';
+              // النجاح: onAuth سيكشف اللوحة بعد تأكيد الدور
+            });
+          })
+          .catch(function(e) {
+            btn.disabled = false; btn.textContent = 'تسجيل الدخول';
+            var c = (e && e.code) || (e && e.message) || 'unknown';
+            console.error('[Login]', c, e);
+            showLoginForm('رمز الخطأ: ' + c);   // وضع تشخيص — يعرض السبب الدقيق
+          });
+      }
+      if (window._fbReady) tryLogin();
+      else window.addEventListener('fbReady', tryLogin, { once: true });
+    }
+
+    document.getElementById('loginPassword').addEventListener('keydown', function(e){ if(e.key==='Enter') doLocalLogin(); });
+    document.getElementById('loginUser').addEventListener('keydown', function(e){ if(e.key==='Enter') doLocalLogin(); });
+
+    // مراقبة حالة تسجيل الدخول
+
+    var _dataLoaded = false;
+
+    // يقرأ دور المستخدم، وإن لم يوجد مستند الدور يُنشئه تلقائياً للحساب المخوّل لهذا التطبيق (الطبيب)
+    function _ensureRole(user) {
+      // الدور يُحدَّد من البريد عبر config.js مباشرةً — بلا أي قراءة من Firestore (يلغي خطأ الصلاحيات وسباق التوكن ويمنع تسجيل الخروج عند Refresh، ولا يستهلك حصّة القراءات). الأمان الحقيقي محفوظ بقواعد الخادم في firestore.rules.
+      var role = (window.DOCBOOK_ROLE_OF ? window.DOCBOOK_ROLE_OF(user && user.email) : null);
+      return Promise.resolve(role);
+    }
+
+    function initAuthWatch() {
+      var ov = document.getElementById('loginOverlay');
+
+      function revealApp() {
+        clearTimeout(_verifyFallbackTimer);
+        ov.style.transition = 'opacity .3s';
+        ov.style.opacity = '0';
+        setTimeout(function(){ ov.style.display = 'none'; }, 300);
+      }
+
+      window._fb.onAuth(function(user) {
+        if (!user) { location.replace('index.html'); return; }   // لا جلسة → صفحة الدخول
+        var role = (window.DOCBOOK_ROLE_OF ? window.DOCBOOK_ROLE_OF(user.email) : null);
+        if (role === 'nurse') { location.replace('../nurse/app.html'); return; }   // حساب ممرضة على لوحة الطبيب → وجّهها للوحتها
+        if (role !== 'doctor') { location.replace('index.html'); return; }   // غير مصرّح → صفحة الدخول
+        // طبيب مصرّح → افتح اللوحة وحمّل البيانات
+        if (_dataLoaded) { revealApp(); return; }
+        _dataLoaded = true;
+        revealApp();
+        if (typeof loadData === 'function') loadData();
+      });
+    }
+    if (window._fbReady) initAuthWatch();
+    else window.addEventListener('fbReady', initAuthWatch, { once: true });
+
+/* ===== Main App ===== */
+    // ==================== التخزين والمتغيرات ====================
+    // مفاتيح مشتركة مع ملف الممرضة
+    const STORAGE_KEY          = 'doctorAppointments';
+    const PATIENTS_STORAGE_KEY = 'doctorPatients';
+    const CLOSED_DAYS_KEY      = 'closedDays';
+    const NOTES_KEY            = 'sharedNotes';
+
+    // ── Confirm Bottom-Sheet (global) ──
+    var _confirmResolve = null;
+    window.appConfirm = function(msg, dangerLabel) {
+      return new Promise(function(resolve) {
+        _confirmResolve = resolve;
+        var sheet = document.getElementById('confirmSheet');
+        var msgEl = document.getElementById('confirmSheetMsg');
+        var okEl  = document.getElementById('confirmSheetOk');
+        if (!sheet || !msgEl || !okEl) { resolve(window.confirm(msg)); return; }
+        msgEl.textContent = msg;
+        okEl.textContent  = dangerLabel || 'تأكيد';
+        sheet.classList.add('show');
+      });
+    };
+    window._confirmSheetOk = function() {
+      var sheet = document.getElementById('confirmSheet');
+      if (sheet) sheet.classList.remove('show');
+      if (_confirmResolve) { _confirmResolve(true);  _confirmResolve = null; }
+    };
+    window._confirmSheetCancel = function() {
+      var sheet = document.getElementById('confirmSheet');
+      if (sheet) sheet.classList.remove('show');
+      if (_confirmResolve) { _confirmResolve(false); _confirmResolve = null; }
+    };
+
+    // ── lsGet/lsSet للقيم المحلية UI فقط (FAB position) ──
+    function lsGet(key, fallback) {
+      try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch(e) { return fallback; }
+    }
+    function lsSet(key, val) {
+      try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {}
+    }
+    function notifyOtherTab(key) {
+      // لم تعد ضرورية — onSnapshot يُزامن تلقائياً
+    }
+
+    const daysAr = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+    const monthsAr = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];
+
+    let today = new Date(); today.setHours(0,0,0,0);
+    let todayStr = toLocalISODate(today);
+    const maxFutureDate = new Date(); maxFutureDate.setMonth(maxFutureDate.getMonth() + 3); maxFutureDate.setHours(23,59,59,999);
+    let thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30); thirtyDaysAgo.setHours(0,0,0,0);
+    let thirtyDaysAgoStr = toLocalISODate(thirtyDaysAgo);
+    // تدوير يوميّ: يُعيد حساب «اليوم» للوحات المفتوحة عبر منتصف الليل (بدل قيمة مجمّدة من وقت التحميل)
+    setInterval(function () {
+      var s = toLocalISODate(new Date());
+      if (s === todayStr) return;
+      today = new Date(); today.setHours(0, 0, 0, 0);
+      todayStr = s;
+      thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30); thirtyDaysAgo.setHours(0, 0, 0, 0);
+      thirtyDaysAgoStr = toLocalISODate(thirtyDaysAgo);
+      try {
+        if (typeof renderCalendar === 'function') renderCalendar();
+        if (typeof _refreshServerStats === 'function') _refreshServerStats();
+      } catch (e) { console.error('[dayRollover]', e); }
+    }, 60000);
+
+    let allRecords = [];
+    let allPatients = {};
+    let closedDays  = [];
+    let currentDate = new Date();
+    let selectedDayStr = todayStr;
+    let currentSection = 'home';
+    window._dayChartAnimate = true; // أول رسم لمخطط توزيع الأيام يكون متحرّكاً (تصاعدي)
+    let currentPatientIdForVisit = null;
+    let currentChartPeriod = 'monthly';
+
+    // ==================== دوال مساعدة ====================
+    function toLocalISODate(date) { const y=date.getFullYear(); const m=String(date.getMonth()+1).padStart(2,'0'); const d=String(date.getDate()).padStart(2,'0'); return `${y}-${m}-${d}`; }
+    function parseLocalISODate(s) { const [y,m,d]=s.split('-').map(Number); return new Date(y,m-1,d); }
+    function formatDateAr(s) { if(!s) return '-'; const d=parseLocalISODate(s); return d.toLocaleDateString('ar-EG',{year:'numeric',month:'long',day:'numeric'}); }
+
+    // تنسيق "آخر تعديل" — يعرض "اليوم 3:25م" / "أمس 9:10ص" / "قبل 3 أيام" / تاريخ كامل
+    function formatRelativeTime(ts) {
+      if (!ts) return '';
+      const now = new Date();
+      const d   = new Date(ts);
+      const diffMs   = now - d;
+      const diffMin  = Math.floor(diffMs / 60000);
+      const diffHr   = Math.floor(diffMs / 3600000);
+      const today0   = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const dDay0    = new Date(d.getFullYear(),   d.getMonth(),   d.getDate()).getTime();
+      const dayDiff  = Math.round((today0 - dDay0) / 86400000);
+
+      // الوقت بصيغة 3:25م
+      const time = d.toLocaleTimeString('ar-EG', { hour:'numeric', minute:'2-digit', hour12:true });
+
+      if (diffMin < 1)   return 'الآن';
+      if (diffMin < 60)  return `قبل ${diffMin} دقيقة`;
+      if (dayDiff === 0) return `اليوم ${time}`;
+      if (dayDiff === 1) return `أمس ${time}`;
+      if (dayDiff < 7)   return `قبل ${dayDiff} أيام`;
+      return d.toLocaleDateString('ar-EG', { year:'numeric', month:'short', day:'numeric' }) + ` ${time}`;
+    }
+    function calculateAge(b) { if(!b) return null; const birth=new Date(b); let age=today.getFullYear()-birth.getFullYear(); const m=today.getMonth()-birth.getMonth(); if(m<0 || (m===0 && today.getDate()<birth.getDate())) age--; return age; }
+    function showToast(msg, type='info') { const toast=document.getElementById('toast'); const content=document.getElementById('toastContent'); content.innerHTML = `<i class="fas fa-${type==='success'?'check-circle':'info-circle'}"></i> ${msg}`; toast.classList.remove('hidden'); setTimeout(()=>toast.classList.add('hidden'),3000); }
+    function normalizeDate(d) { if (!d) return ''; if (d && d.toDate) d = d.toDate(); if (d instanceof Date) return toLocalISODate(d); return String(d).slice(0,10); }
+    function isDayClosed(dateStr) { return Array.isArray(closedDays) && closedDays.indexOf(dateStr) !== -1; }
+
+    // ── Web Audio API — AudioContext مشترك مع keepalive ──
+    var _docAudioCtx = null;
+    function _getDocCtx() {
+      if (!_docAudioCtx || _docAudioCtx.state === 'closed') {
+        try { _docAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) { return null; }
+      }
+      return _docAudioCtx;
+    }
+    function _primeDocAudio() {
+      var ctx = _getDocCtx();
+      if (ctx && ctx.state === 'suspended') ctx.resume();
+      document.removeEventListener('click',      _primeDocAudio);
+      document.removeEventListener('touchstart', _primeDocAudio);
+      document.removeEventListener('keydown',    _primeDocAudio);
+    }
+    document.addEventListener('click',      _primeDocAudio);
+    document.addEventListener('touchstart', _primeDocAudio);
+    document.addEventListener('keydown',    _primeDocAudio);
+    // keepalive: نبضة صامتة كل 30 ثانية
+    setInterval(function() {
+      var ctx = _getDocCtx();
+      if (ctx && ctx.state === 'running') {
+        try { var o=ctx.createOscillator(),g=ctx.createGain(); g.gain.value=0; o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime+0.001); } catch(e) {}
+      }
+    }, 30000);
+
+    function playDocNotifSound() {
+      var ctx = _getDocCtx(); if (!ctx) return;
+      function _play() {
+        try {
+          var now = ctx.currentTime;
+          [0, 0.18, 0.36].forEach(function(t) {
+            var o=ctx.createOscillator(), g=ctx.createGain();
+            o.connect(g); g.connect(ctx.destination);
+            o.type='sine'; o.frequency.value=880;
+            g.gain.setValueAtTime(0.35, now+t);
+            g.gain.exponentialRampToValueAtTime(0.001, now+t+0.22);
+            o.start(now+t); o.stop(now+t+0.22);
+          });
+        } catch(e) {}
+      }
+      if (ctx.state === 'suspended') ctx.resume().then(_play); else _play();
+    }
+
+    // ── نظام إشعارات متعددة متراكمة للطبيب ──
+    var _docNotifContainer = null;
+    function _getDocNotifContainer() {
+      if (!_docNotifContainer) {
+        _docNotifContainer = document.createElement('div');
+        _docNotifContainer.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:9998;display:flex;flex-direction:column-reverse;gap:10px;';
+        document.body.appendChild(_docNotifContainer);
+      }
+      return _docNotifContainer;
+    }
+
+    function showDocNotifToast(msg) {
+      // ── مُعطّل: أُوقف نظام تنبيهات الممرضة → الطبيب بناءً على الطلب ──
+      return;
+      /* eslint-disable no-unreachable */
+      var el = document.createElement('div');
+      el.style.cssText = 'background:var(--primary);color:white;font-weight:800;font-size:.92rem;padding:13px 22px;border-radius:12px;box-shadow:0 4px 20px rgba(13,148,136,.35);opacity:0;transform:translateX(20px);transition:opacity .25s,transform .25s;white-space:nowrap;max-width:280px;cursor:pointer;';
+      el.textContent = msg;
+      _getDocNotifContainer().appendChild(el);
+      requestAnimationFrame(function() {
+        requestAnimationFrame(function() {
+          el.style.opacity = '1'; el.style.transform = 'translateX(0)';
+        });
+      });
+      var dismiss = function() {
+        clearTimeout(el._t);
+        el.style.opacity = '0'; el.style.transform = 'translateX(20px)';
+        setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 280);
+      };
+      el.onclick = dismiss;
+      el._t = setTimeout(dismiss, 8000);
+      playDocNotifSound();
+    }
+    var _docAudioCtx = null;
+    function getDocAudioCtx() {
+      if (!_docAudioCtx || _docAudioCtx.state === 'closed') {
+        try { _docAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) { return null; }
+      }
+      return _docAudioCtx;
+    }
+    function primeDocAudio() {
+      var ctx = getDocAudioCtx();
+      if (ctx && ctx.state === 'suspended') ctx.resume();
+      document.removeEventListener('click',      primeDocAudio);
+      document.removeEventListener('touchstart', primeDocAudio);
+      document.removeEventListener('keydown',    primeDocAudio);
+    }
+    document.addEventListener('click',      primeDocAudio);
+    document.addEventListener('touchstart', primeDocAudio);
+    document.addEventListener('keydown',    primeDocAudio);
+    // keepalive: نبضة صامتة كل 30 ثانية
+    setInterval(function() {
+      var ctx = getDocAudioCtx();
+      if (ctx && ctx.state === 'running') {
+        try {
+          var o = ctx.createOscillator(), g = ctx.createGain();
+          g.gain.value = 0;
+          o.connect(g); g.connect(ctx.destination);
+          o.start(); o.stop(ctx.currentTime + 0.001);
+        } catch(e) {}
+      }
+    }, 30000);
+
+    function playDocNotifSound() {
+      var ctx = getDocAudioCtx(); if (!ctx) return;
+      function _doPlay() {
+        try {
+          var now = ctx.currentTime;
+          [0, 0.18, 0.36].forEach(function(t) {
+            var o = ctx.createOscillator(), g = ctx.createGain();
+            o.connect(g); g.connect(ctx.destination);
+            o.type = 'sine'; o.frequency.value = 880;
+            g.gain.setValueAtTime(0.35, now + t);
+            g.gain.exponentialRampToValueAtTime(0.001, now + t + 0.22);
+            o.start(now + t); o.stop(now + t + 0.22);
+          });
+        } catch(e) {}
+      }
+      if (ctx.state === 'suspended') ctx.resume().then(_doPlay); else _doPlay();
+    }
+
+    function normalizePhone(p) { return (p||'').replace(/[^\d+]/g,''); }
+    function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+
+    // ==================== تحميل البيانات ====================
+    // ── ترحيل localStorage القديم إلى Firestore ──
+    function migrateLocalStorageToFirestore() {
+      // مسح البيانات القديمة من localStorage — Firestore هو المصدر الوحيد
+      try {
+        localStorage.removeItem('doctorAppointments');
+        localStorage.removeItem('doctorPatients');
+        localStorage.removeItem('closedDays');
+        localStorage.removeItem('doctorSettings');
+        localStorage.removeItem('nurseSettings');
+        localStorage.removeItem('sharedNotes');
+      } catch(e) {}
+    }
+
+    // ── مستمعو Firestore ──
+    var _unsubAppt = null, _unsubPat = null, _unsubClosed = null, _unsubAlerts = null, _unsubNowServing = null;
+
+    /* ── تعليم المواعيد المؤكّدة الماضية «لم يحضر» ──
+       يُستدعى من مستمع المواعيد، فلا بدّ من حمايته من إعادة الدخول:
+       كل كتابة تُطلق سنابشوتاً جديداً يستدعيه من جديد. */
+    var _nsBusy = false;          // دفعة قيد الإرسال الآن
+    var _nsTried = Object.create(null);   // ما جرّبناه في هذه الجلسة (نجح أو فشل)
+    var NS_CHUNK = 400;           // دون حدّ Firestore (٥٠٠) بهامش أمان
+
+    function autoMarkNoShow() {
+      if (_nsBusy) return;
+      var todayStr = toLocalISODate(new Date());   // محلّي لا UTC — يتّسق مع الممرضة
+      var toMark = allRecords.filter(function(r) {
+        return r.Status === 'Accepted' && r.Date && r.Date < todayStr && !_nsTried[r.id];
+      });
+      if (!toMark.length) return;
+
+      _nsBusy = true;
+      toMark.forEach(function(r) { _nsTried[r.id] = true; });   // لا نعيد المحاولة بلا نهاية
+
+      var chunks = [];
+      for (var i = 0; i < toMark.length; i += NS_CHUNK) chunks.push(toMark.slice(i, i + NS_CHUNK));
+
+      // دفعة تلو الأخرى بالتسلسل — لا نُغرق الشبكة ولا نتجاوز حدّ العمليات
+      var idx = 0;
+      (function nextChunk() {
+        if (idx >= chunks.length) { _nsBusy = false; return; }
+        var part = chunks[idx++];
+        var done = function() { nextChunk(); };
+        try {
+          var batch = window._fb.batch();
+          part.forEach(function(r) { batch.update(window._fb.docRef('appointments', r.id), { Status: 'NoShow' }); });
+          batch.commit().then(done).catch(function(e) { console.error('[autoNoShow] دفعة', e); done(); });
+        } catch (e) {
+          Promise.all(part.map(function(r) {
+            return window._fb.updateDoc(window._fb.docRef('appointments', r.id), { Status: 'NoShow' })
+              .catch(function(err) { console.error('[autoNoShow]', err); });
+          })).then(done);
+        }
+      })();
+    }
+    var _alertSeenAt = 0;
+    var _shownAlertIds = new Set(); // منع التكرار بدلاً من _lastAcceptedAlertId
+
+    // ── فحص التنبيهات الفائتة عند فتح اللوحة ──
+    // ── فحص الطلبات الجديدة الفائتة عند فتح لوحة الممرضة ──
+    function checkMissedNewRequests() {
+      var SEEN_KEY = 'docbook_nur_apptSeen';
+      var lastSeen = parseInt(localStorage.getItem(SEEN_KEY) || '0', 10);
+      var nowTs = Date.now();
+      localStorage.setItem(SEEN_KEY, String(nowTs));
+      if (lastSeen === 0) return;
+      var pending = allRecords.filter(function(r) {
+        if (r.Status !== 'Pending') return false;
+        var ts = r.createdAt && r.createdAt.toMillis ? r.createdAt.toMillis()
+               : r.createdAt ? new Date(r.createdAt).getTime() : 0;
+        return ts > lastSeen && ts <= nowTs;
+      });
+      if (pending.length === 0) return;
+      var msg = pending.length === 1
+        ? 'طلب جديد: ' + (pending[0].PatientName || 'مريض')
+        : pending.length + ' طلبات جديدة';
+      if (typeof showNotifToast === 'function') showNotifToast(msg);
+    }
+
+    // ── فحص الإجراءات الفائتة عند فتح لوحة الطبيب ──
+    function checkMissedAlerts() {
+      var SEEN_KEY = 'docbook_doc_alertSeen';
+      var lastSeen = parseInt(localStorage.getItem(SEEN_KEY) || '0', 10);
+      var nowTs = Date.now();
+      localStorage.setItem(SEEN_KEY, String(nowTs));
+      if (lastSeen === 0) return; // أول مرة — لا إشعار
+      // جلب مرة واحدة ثم إلغاء الاستماع
+      var unsub = window._fb.onSnapshot(window._fb.query(window._fb.col('alerts'), window._fb.orderBy('createdAt','desc'), window._fb.limit(50)), function(snap) {
+        if (unsub) { unsub(); unsub = null; }
+        var missed = snap.docs
+          .map(function(d) { return Object.assign({ id: d.id }, d.data()); })
+          .filter(function(a) {
+            var ts = a.createdAt && a.createdAt.toMillis ? a.createdAt.toMillis()
+                   : a.createdAt ? new Date(a.createdAt).getTime() : 0;
+            // فقط nurseToDoctor — مستثنى استدعاء الممرضة وأدخل المريض
+            return a.direction === 'nurseToDoctor' && ts > lastSeen && ts <= nowTs;
+          });
+        if (missed.length === 0) return;
+        var msg = missed.length === 1
+          ? (missed[missed.length-1].message || 'تم قبول موعد')
+          : missed.length + ' إجراءات فائتة';
+        if (typeof showDocNotifToast === 'function') showDocNotifToast(msg);
+      }, function() {});
+    }
+
+    function loadData() {
+      migrateLocalStorageToFirestore();
+      _alertSeenAt = Date.now();
+
+      // ── تنظيف تلقائي للتنبيهات القديمة (بديل TTL يعمل على الخطة المجانية، بلا فوترة) ──
+      // مرّة كل ٢٤ ساعة فقط: يحذف التنبيهات التي تجاوزت expireAt (أقدم من ٣٠ يوماً).
+      (function pruneOldAlerts() {
+        try {
+          var KEY = 'alertsPrunedAt';
+          if (Date.now() - (+localStorage.getItem(KEY) || 0) < 24*60*60*1000) return;
+          localStorage.setItem(KEY, String(Date.now()));
+          window._fb.getDocs(window._fb.query(
+            window._fb.col('alerts'),
+            window._fb.where('expireAt', '<', new Date()),
+            window._fb.limit(200)
+          )).then(function(snap) {
+            if (!snap || snap.empty) return;
+            var batch = window._fb.batch();
+            snap.docs.forEach(function(d) { batch.delete(d.ref); });
+            return batch.commit();
+          }).catch(function() {});
+        } catch (e) {}
+      })();
+
+      // المواعيد
+      if (_unsubAppt) _unsubAppt();
+      var _nurseApptFirstLoad = true;
+      // [أقصى توفير] المواعيد: آخر 30 يوماً وما بعدها فقط
+      var _apptWinStart = (function(){ var d=new Date(); d.setDate(d.getDate()-30); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); })();
+      _unsubAppt = window._fb.onSnapshot(window._fb.query(window._fb.col('appointments'), window._fb.where('Date','>=',_apptWinStart)),
+        function(snap) {
+          allRecords = snap.docs.map(function(d) { return Object.assign({ id: d.id }, d.data()); });
+          window._allRecords = allRecords;
+
+          // ====== تحويل المواعيد المؤكدة الماضية تلقائياً إلى "لم يحضر" ======
+          /* كانت تعمل عند **كل** سنابشوت بلا حارس، وكل كتابة تولّد سنابشوتاً جديداً
+             فتنطلق دفعة أخرى قبل أن تهبط السابقة ⇒ عاصفة كتابات وارتعاش في الواجهة
+             (تظهر الحالة وتختفي كل ثانية). وفوق ذلك حدّ الدفعة في Firestore ٥٠٠
+             عملية، وبيانات ثلاثة أشهر تتجاوزه فتفشل الدفعة ويتحوّل إلى مئات
+             الكتابات المنفردة. الحلّ: حارس تنفيذ + تقسيم إلى دفعات + عدم إعادة
+             محاولة ما سبق إرساله في هذه الجلسة. */
+          autoMarkNoShow();
+          // ================================================================
+
+          renderCalendar();
+          if (selectedDayStr) renderAgendaForDay(selectedDayStr);
+          if (typeof renderScheduleGrid === 'function') renderScheduleGrid();
+          if (currentSection === 'stats') calculateStatsFromPatients();
+          updateHomeSummaryStats();
+          renderHomeWidgets();
+          renderHomeCalendar();
+          // فحص الطلبات الفائتة عند أول تحميل فقط
+          if (_nurseApptFirstLoad) {
+            _nurseApptFirstLoad = false;
+            setTimeout(checkMissedNewRequests, 1000);
+          }
+        },
+        function(e) { console.error('[appointments]', e); }
+      );
+
+      // المرضى — [أقصى توفير] لحظي لأول 40 بالاسم (يقرأ 40 مرّة واحدة ثم التغييرات فقط)، والبحث يجلب من الخادم
+      if (_unsubPat) _unsubPat();
+      _unsubPat = window._fb.onSnapshot(window._fb.query(window._fb.col('patients'), window._fb.orderBy('lastVisit', 'desc'), window._fb.limit(40)),
+        function(snap) {
+          allPatients = {};
+          _pbAllCache = null;   // أي تغيير على المرضى ⇒ أبطِل كاش البحث ليُعاد جلبه طازجاً
+          snap.forEach(function(d) { allPatients[d.id] = Object.assign({ id: d.id }, d.data()); });
+          // العدد الحقيقي من الخادم (المحمَّل ٤٠ فقط) — و«+» فقط إن تعذّر
+          _refreshServerStats().then(function(s) {
+            var el = document.getElementById('totalPatientsCount');
+            if (el) el.textContent = s ? String(s.totalPatients) : (Object.keys(allPatients).length + '+');
+            if (currentSection === 'stats') calculateStatsFromPatients();
+            if (typeof updateHomeSummaryStats === 'function') updateHomeSummaryStats();
+          });
+          if (currentSection === 'patients') renderPatientBook();
+        },
+        function(e) { console.error('[patients]', e); });
+
+      // الأيام المغلقة
+      if (_unsubClosed) _unsubClosed();
+      _unsubClosed = window._fb.onSnapshot(window._fb.docRef('config', 'closedDays'),
+        function(snap) {
+          closedDays = snap.exists() ? (snap.data().list || []) : [];
+          renderCalendar();
+          if (selectedDayStr) renderAgendaForDay(selectedDayStr);
+          if (typeof renderScheduleGrid === 'function') renderScheduleGrid();
+        }
+      );
+
+      // ── تنبيهات الممرضة → الطبيب: مُعطّلة بناءً على الطلب ──
+      // أُوقف نظام التنبيهات القادمة من الممرضة (تنبيهات المواعيد / إضافة موعد).
+      // لم يَعُد يُنشأ مُستمع alerts ولا قناة البثّ — توفيراً للـ reads وإيقافاً للإشعارات.
+      if (_unsubAlerts) { _unsubAlerts(); _unsubAlerts = null; }
+
+      // ── الممرّضة → الطبيب: إشعار «المريض التالي جاهز» (مستمع وثيقة واحدة، رخيص) ──
+      // عند تسجيل الممرّضة زيارةً تكتب config/nowServing؛ يظهر عند الطبيب إشعار دائم حتى يفتح أو يُخفي.
+      if (_unsubNowServing) _unsubNowServing();
+      var _nsInit = true, _nsLastTs = 0;
+      _unsubNowServing = window._fb.onSnapshot(window._fb.docRef('config', 'nowServing'), function(snap) {
+        // تجاهل أوّل لقطة فقط (القيمة الموجودة وقت الإقلاع، أو عدم وجود الوثيقة) — لا نبتلع إشارة الممرّضة
+        if (_nsInit) { _nsInit = false; if (snap.exists()) _nsLastTs = (snap.data() || {}).ts || 0; return; }
+        if (!snap.exists()) return;
+        var d = snap.data() || {}, ts = d.ts || 0;
+        console.log('[nowServing] وصلت إشارة:', d);
+        if (ts === _nsLastTs || !d.patientId) return;   // نفس الإشارة (إعادة اتصال) → تجاهل
+        _nsLastTs = ts;
+        showNextPatientNotif(d.patientId, d.name);
+      }, function(e){ console.error('[nowServing] خطأ في المستمع (قد تكون قاعدة الأمان تمنع قراءة config):', e); });
+
+      // الإعدادات (يدمج مع المحفوظ محلياً ويحدّثه)
+      window._fb.getDoc('settings', 'doctor').then(function(snap) {
+        if (snap.exists()) {
+          settings = Object.assign({}, settings, snap.data());
+          try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+          applySettings();
+        }
+        // حساب جديد بلا تخصّص ولا علامة onboarded ⇒ تُعرض شاشة الإعداد مرّة واحدة
+        if (typeof maybeStartOnboarding === 'function') maybeStartOnboarding();
+        // كُشِف القرار: إن لم تُفتح شاشة الإعداد فالحساب مُعَدّ ⇒ أظهر التطبيق
+        var _ov = document.getElementById('onboardOverlay');
+        if (!(_ov && _ov.classList.contains('show'))) document.documentElement.classList.remove('ob-pending');
+      }).catch(function(){ document.documentElement.classList.remove('ob-pending'); });
+
+      // التنبيه المخصص
+      window._fb.getDoc('config', 'customAlert').then(function(snap) {
+        if (snap.exists()) {
+          customAlertData = snap.data();
+          if (typeof updateCustomLabels === 'function') updateCustomLabels(customAlertData.label);
+        }
+      }).catch(function(){});
+    }
+
+    // ==================== دوال الإحصائيات ====================
+    /* أرقام المرضى تُحسب على الخادم لا من allPatients (محدودة بـ limit(40)):
+       عند ١٠٠ مريض كانت الشاشة تعرض ٤٠٪ من الحقيقة بلا أي إشارة. النتائج تُخزَّن
+       في _serverStats ويُحدّثها _refreshServerStats() عند الإقلاع وبعد كل زيارة. */
+    var _serverStats = null;
+
+    function _refreshServerStats() {
+      var fb = window._fb;
+      if (!fb || typeof fb.countOf !== 'function') return Promise.resolve(null);
+      var col = fb.col('patients');
+      return Promise.all([
+        fb.countOf(col),
+        fb.sumOf(col, 'totalVisits'),
+        fb.countOf(fb.query(col, fb.where('lastVisit', '>=', thirtyDaysAgoStr))),
+        fb.countOf(fb.query(col, fb.where('totalVisits', '>', 1)))
+      ]).then(function(r) {
+        _serverStats = { totalPatients: r[0], totalVisits: r[1], activeCount: r[2], repeatPatients: r[3] };
+        return _serverStats;
+      }).catch(function(e) {
+        console.warn('[stats] تعذّر الحساب على الخادم — عرض تقديري من المحمَّل', e);
+        return null;
+      });
+    }
+
+    function calculateStatsFromPatients() {
+      let totalVisits = 0;
+      let activeCount = 0;
+      let morningCount = 0;
+      let eveningCount = 0;
+      let repeatPatients = 0;
+      let totalPatients = Object.keys(allPatients).length;
+      let allVisits = [];
+      let approx = true;   // تقديري ما لم تصل أرقام الخادم
+
+      Object.values(allPatients).forEach(patient => {
+        totalVisits += patient.totalVisits || 0;
+        if (patient.totalVisits > 1) repeatPatients++;
+        if (patient.lastVisit && patient.lastVisit >= thirtyDaysAgoStr) activeCount++;
+        if (patient.appointments) {
+          patient.appointments.forEach(v => {
+            allVisits.push({ patientId: patient.id, patientName: patient.name, date: v.date, visitType: v.visitType });
+          });
+        }
+      });
+
+      // أرقام الخادم تَجُبّ ما حُسب من الأربعين
+      if (_serverStats) {
+        totalPatients  = _serverStats.totalPatients;
+        totalVisits    = _serverStats.totalVisits;
+        activeCount    = _serverStats.activeCount;
+        repeatPatients = _serverStats.repeatPatients;
+        approx = false;
+      }
+
+      /* صباحي/مسائي من مجموعة المواعيد لا من مصفوفة الأربعين. سبب إضافي:
+         المقارنة القديمة v.slot === 'Morning' لا تصدق على زيارات الاضبارة أصلاً،
+         لأن addNewVisit يكتب وقتاً ('14:30') لا كلمة — فكانت تُهمَل كلها. */
+      allRecords.forEach(r => {
+        var s = r.Slot || r.slot || '';
+        if (s === 'Morning') { morningCount++; return; }
+        if (s === 'Evening') { eveningCount++; return; }
+        var m = /^(\d{1,2}):/.exec(String(s));
+        if (m) { (+m[1] < 14 ? morningCount++ : eveningCount++); }
+      });
+
+      allVisits.sort((a,b) => (b.date||'').localeCompare(a.date||''));
+      const recentVisits = allVisits.slice(0, 30);
+      const repeatRate = totalPatients ? ((repeatPatients / totalPatients) * 100).toFixed(1) : 0;
+
+      // إحصائيات جديدة
+      const accepted = allRecords.filter(r => r.Status === 'Accepted');
+      const noShow   = allRecords.filter(r => r.Status === 'NoShow').length;
+
+      // زيارات هذا الشهر
+      const nowM = new Date();
+      const thisMonthPrefix = `${nowM.getFullYear()}-${String(nowM.getMonth()+1).padStart(2,'0')}`;
+      const thisMonth = accepted.filter(r => r.Date && r.Date.startsWith(thisMonthPrefix)).length;
+
+      // متوسط الزيارات اليومي (على أيام العمل التي بها مواعيد)
+      const dayMap = {};
+      accepted.forEach(r => { if (r.Date) { const d = r.Date.substring(0,10); dayMap[d] = (dayMap[d]||0)+1; } });
+      const activeDays = Object.keys(dayMap).length;
+      const avgDaily = activeDays ? (accepted.length / activeDays).toFixed(1) : '0';
+
+      // توزيع الأيام (الأسبوع الحالي فقط)
+      const weekdayCounts = Array(7).fill(0);
+      const _sToday = new Date();
+      const _sStart = new Date(_sToday);
+      _sStart.setDate(_sToday.getDate() - _sToday.getDay());
+      _sStart.setHours(0,0,0,0);
+      const _sEnd = new Date(_sStart);
+      _sEnd.setDate(_sStart.getDate() + 6);
+      const _sStartStr = toLocalISODate(_sStart);
+      const _sEndStr   = toLocalISODate(_sEnd);
+      allRecords.forEach(r => {
+        if (!r.Date || r.Status === 'Pending') return;
+        const dateStr = normalizeDate(r.Date);
+        if (!dateStr || dateStr < _sStartStr || dateStr > _sEndStr) return;
+        const parts = dateStr.split('-').map(Number);
+        const d = new Date(parts[0], parts[1]-1, parts[2]);
+        weekdayCounts[d.getDay()]++;
+      });
+      const busyIdx = weekdayCounts.indexOf(Math.max(...weekdayCounts));
+      const busyDay = Math.max(...weekdayCounts) > 0 ? daysAr[busyIdx] : '—';
+
+      return { totalVisits, activeCount, repeatRate, morningCount, eveningCount, recentVisits, noShow, thisMonth, avgDaily, busyDay, weekdayCounts, totalPatients, approx };
+    }
+
+    function calculateCancelledAppointments() {
+      return allRecords.filter(r => r.Status === 'Cancelled' || r.Status === 'Rejected').length;
+    }
+
+    function renderWeekdayBars(weekdayCounts) {
+      const wrap   = document.getElementById('weekdayBarsWrap');
+      const labels = document.getElementById('weekdayBarsLabels');
+      if (!wrap || !labels) return;
+
+      const dayNames = ['الأحد','الإثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+      const max    = Math.max(...weekdayCounts, 1);
+      const maxIdx = weekdayCounts.indexOf(Math.max(...weekdayCounts));
+
+      const W = 700, H = 150;
+      const padY = 28, padXl = 52, padXr = 52;
+      const chartW = W - padXl - padXr;
+      const chartH = H - padY - 24;
+      const base   = padY + chartH;
+
+      const pts = weekdayCounts.map((v, i) => ({
+        x: padXl + (i / 6) * chartW,
+        y: padY + chartH - (v / max) * chartH,
+        v
+      }));
+
+      // ── Smooth Cubic Bezier ──
+      function smoothPath(p) {
+        if (p.length < 2) return '';
+        let d = 'M' + p[0].x.toFixed(1) + ',' + p[0].y.toFixed(1);
+        for (let i = 0; i < p.length - 1; i++) {
+          const cp = (p[i + 1].x - p[i].x) * 0.42;
+          d += ' C' + (p[i].x + cp).toFixed(1) + ',' + p[i].y.toFixed(1) +
+               ' ' + (p[i + 1].x - cp).toFixed(1) + ',' + p[i + 1].y.toFixed(1) +
+               ' ' + p[i + 1].x.toFixed(1) + ',' + p[i + 1].y.toFixed(1);
+        }
+        return d;
+      }
+
+      const linePath = smoothPath(pts);
+      const areaPath = linePath +
+        ' L' + pts[6].x.toFixed(1) + ',' + base +
+        ' L' + pts[0].x.toFixed(1) + ',' + base + ' Z';
+
+      // خطوط شبكة أفقية
+      const gridLines = [0, 0.5, 1].map(r => {
+        const y = (padY + chartH - r * chartH).toFixed(1);
+        const v = Math.round(r * max);
+        return '<line x1="' + padXl + '" y1="' + y + '" x2="' + (W - padXr) + '" y2="' + y +
+               '" stroke="rgba(148,163,184,0.12)" stroke-width="1"/>' +
+               (v > 0 ? '<text x="' + (padXl - 6) + '" y="' + (parseFloat(y) + 4) +
+               '" text-anchor="end" font-size="9" fill="rgba(148,163,184,0.7)">' + v + '</text>' : '');
+      }).join('');
+
+      // أعمدة شفافة للـ hover (hit area)
+      const colW = chartW / 7;
+      const hitAreas = pts.map((p, i) =>
+        '<rect class="whit" x="' + (p.x - colW / 2).toFixed(1) + '" y="' + padY +
+        '" width="' + colW.toFixed(1) + '" height="' + chartH +
+        '" fill="transparent" data-v="' + p.v + '" data-i="' + i + '" style="cursor:pointer;"/>'
+      ).join('');
+
+      // خطوط رأسية دقيقة عند hover
+      const vLines = pts.map((p, i) =>
+        '<line class="cvl" x1="' + p.x.toFixed(1) + '" y1="' + padY +
+        '" x2="' + p.x.toFixed(1) + '" y2="' + base +
+        '" stroke="rgba(99,102,241,0.22)" stroke-width="1" stroke-dasharray="4,3" opacity="0"/>'
+      ).join('');
+
+      // نقاط مع glow للأعلى
+      const dots = pts.map((p, i) => {
+        const isMax = i === maxIdx;
+        const r = isMax ? 6 : 4.5;
+        const glow = isMax ? '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="11" fill="#6366f1" opacity="0.15"/>' : '';
+        return glow + '<circle class="cdot"' +
+          ' cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '"' +
+          ' r="' + r + '"' +
+          ' fill="' + (isMax ? '#6366f1' : 'white') + '"' +
+          ' stroke="' + (isMax ? '#4f46e5' : '#6366f1') + '" stroke-width="2.5"' +
+          ' data-v="' + p.v + '" data-i="' + i + '"' +
+          ' style="cursor:pointer;filter:' + (isMax ? 'drop-shadow(0 2px 6px rgba(99,102,241,0.5))' : 'none') + ';"/>';
+      }).join('');
+
+      // أرقام فوق كل نقطة مباشرة
+      const valueLabels = pts.map((p, i) => {
+        if (p.v === 0) return '';
+        const isMax = i === maxIdx;
+        const yPos  = (p.y - 13).toFixed(1);
+        return '<text x="' + p.x.toFixed(1) + '" y="' + yPos +
+          '" text-anchor="middle" font-size="' + (isMax ? '12' : '10.5') + '"' +
+          ' font-weight="' + (isMax ? '800' : '700') + '"' +
+          ' fill="' + (isMax ? '#6366f1' : 'rgba(100,116,139,0.9)') + '">' +
+          p.v + '</text>';
+      }).join('');
+
+      wrap.style.cssText = 'display:block;width:100%;height:165px;position:relative;';
+      wrap.innerHTML =
+        '<div id="wTip" style="position:absolute;background:rgba(15,23,42,0.92);color:white;padding:6px 13px;border-radius:10px;font-size:.76rem;font-weight:700;pointer-events:none;opacity:0;transition:opacity .15s;white-space:nowrap;z-index:10;box-shadow:0 4px 16px rgba(0,0,0,.25);"></div>' +
+        '<svg id="wChart" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="width:100%;height:100%;display:block;overflow:visible;">' +
+        '<defs>' +
+          '<linearGradient id="wAreaG" x1="0" y1="0" x2="0" y2="1">' +
+            '<stop offset="0%" stop-color="#6366f1" stop-opacity="0.18"/>' +
+            '<stop offset="60%" stop-color="#6366f1" stop-opacity="0.06"/>' +
+            '<stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>' +
+          '</linearGradient>' +
+          '<linearGradient id="wLineG" x1="0" y1="0" x2="1" y2="0">' +
+            '<stop offset="0%" stop-color="#a5b4fc"/>' +
+            '<stop offset="50%" stop-color="#6366f1"/>' +
+            '<stop offset="100%" stop-color="#4f46e5"/>' +
+          '</linearGradient>' +
+          '<clipPath id="wClip"><rect id="wClipRect" x="0" y="0" width="0" height="' + H + '"/></clipPath>' +
+        '</defs>' +
+        gridLines + vLines + hitAreas +
+        '<path id="wArea" d="' + areaPath + '" fill="url(#wAreaG)" clip-path="url(#wClip)" style="opacity:0;"/>' +
+        '<path id="wLine" d="' + linePath + '" fill="none" stroke="url(#wLineG)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '<g id="wDots" style="opacity:0;">' + dots + '</g>' +
+        '<g id="wVals" style="opacity:0;">' + valueLabels + '</g>' +
+        '</svg>';
+
+      // Labels تحت كل نقطة
+      labels.style.cssText = 'position:relative;width:100%;height:20px;margin-top:4px;direction:ltr;display:block;';
+      labels.innerHTML = pts.map((p, i) => {
+        const leftPct = ((p.x / W) * 100).toFixed(2);
+        const isMax   = i === maxIdx;
+        return '<span style="position:absolute;left:' + leftPct + '%;transform:translateX(-50%);' +
+          'font-size:.68rem;font-weight:' + (isMax ? '800' : '600') + ';' +
+          'color:' + (isMax ? '#6366f1' : 'var(--text-muted)') + ';white-space:nowrap;' +
+          (isMax ? 'background:rgba(99,102,241,0.08);padding:1px 6px;border-radius:6px;' : '') + '">' +
+          dayNames[i] + '</span>';
+      }).join('');
+
+      // ===== أنيميشن =====
+      requestAnimationFrame(function() {
+        const lineEl   = document.getElementById('wLine');
+        const clipRect = document.getElementById('wClipRect');
+        const areaEl   = document.getElementById('wArea');
+        const dotsEl   = document.getElementById('wDots');
+        const valsEl   = document.getElementById('wVals');
+        if (!lineEl) return;
+
+        const len = lineEl.getTotalLength ? lineEl.getTotalLength() : 900;
+        lineEl.style.strokeDasharray  = len;
+        lineEl.style.strokeDashoffset = len;
+
+        const dur = 1100;
+        let start = null;
+        function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+
+        requestAnimationFrame(function animate(ts) {
+          if (!start) start = ts;
+          const t = Math.min((ts - start) / dur, 1);
+          const e = easeOut(t);
+
+          lineEl.style.strokeDashoffset = (len * (1 - e)).toFixed(1);
+          if (clipRect) clipRect.setAttribute('width', (e * W).toFixed(1));
+          if (areaEl)   areaEl.style.opacity = (e * 1).toFixed(3);
+
+          if (t < 1) {
+            requestAnimationFrame(animate);
+          } else {
+            if (dotsEl) { dotsEl.style.transition = 'opacity 0.3s ease'; dotsEl.style.opacity = '1'; }
+            if (valsEl) { setTimeout(function(){ valsEl.style.transition = 'opacity 0.4s ease'; valsEl.style.opacity = '1'; }, 150); }
+          }
+        });
+      });
+
+      // ===== Hover على hit areas =====
+      const svg = document.getElementById('wChart');
+      const tip = document.getElementById('wTip');
+      if (!svg || !tip) return;
+
+      svg.querySelectorAll('.whit').forEach(function(hit) {
+        const i  = parseInt(hit.getAttribute('data-i'));
+        const v  = parseInt(hit.getAttribute('data-v'));
+        const vl = svg.querySelectorAll('.cvl')[i];
+        const dot = svg.querySelectorAll('.cdot')[i];
+        const isMax = i === maxIdx;
+        const r0 = isMax ? 6 : 4.5;
+
+        hit.addEventListener('mouseenter', function() {
+          tip.textContent = dayNames[i] + ': ' + v + ' موعد';
+          tip.style.opacity = '1';
+          if (dot) dot.setAttribute('r', r0 + 2);
+          if (vl)  vl.setAttribute('opacity', '1');
+        });
+        hit.addEventListener('mousemove', function(e) {
+          const rect = wrap.getBoundingClientRect();
+          const tx = e.clientX - rect.left - tip.offsetWidth / 2;
+          const ty = e.clientY - rect.top - 50;
+          tip.style.left = Math.max(0, Math.min(tx, rect.width - tip.offsetWidth)) + 'px';
+          tip.style.top  = ty + 'px';
+        });
+        hit.addEventListener('mouseleave', function() {
+          tip.style.opacity = '0';
+          if (dot) dot.setAttribute('r', r0);
+          if (vl)  vl.setAttribute('opacity', '0');
+        });
+      });
+    }
+
+
+    function updateStats(useAnimation = true) {
+      const stats = calculateStatsFromPatients();
+      const cancelled = calculateCancelledAppointments();
+
+      const activeEl    = document.getElementById('statActiveUsers');
+      const totalEl     = document.getElementById('statTotalVisits');
+      const cancelledEl = document.getElementById('statCancelled');
+      const repeatEl    = document.getElementById('statConversion');
+      const noShowEl    = document.getElementById('statNoShow');
+      const thisMonthEl = document.getElementById('statThisMonth');
+      const avgDailyEl  = document.getElementById('statAvgDaily');
+      const busyDayEl   = document.getElementById('statBusyDay');
+
+      if (useAnimation) {
+        animateNumber(activeEl, stats.activeCount);
+        animateNumber(totalEl, stats.totalVisits);
+        animateNumber(cancelledEl, cancelled);
+        animateNumber(repeatEl, stats.repeatRate, '%');
+        animateNumber(noShowEl, stats.noShow);
+        animateNumber(thisMonthEl, stats.thisMonth);
+      } else {
+        activeEl.textContent    = stats.activeCount;
+        totalEl.textContent     = stats.totalVisits;
+        cancelledEl.textContent = cancelled;
+        repeatEl.textContent    = stats.repeatRate + '%';
+        noShowEl.textContent    = stats.noShow;
+        thisMonthEl.textContent = stats.thisMonth;
+      }
+      if (avgDailyEl)  avgDailyEl.textContent  = stats.avgDaily;
+      if (busyDayEl)   busyDayEl.textContent    = stats.busyDay;
+
+      // دائرة الصباح/المساء — يُحدَّث عبر updateDonutChart حسب الفلتر المحدد
+      updateDonutChart();
+
+      // جدول أحدث الزيارات
+      const tbody = document.getElementById('recentAppointmentsTable');
+      if (stats.recentVisits.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;padding:16px 0;color:var(--text-muted)">لا توجد زيارات</td></tr>';
+      } else {
+        tbody.innerHTML = stats.recentVisits.map(v =>
+          `<tr style="cursor:pointer;" onclick="openPatientDetailsModal('${v.patientId}')">` +
+          `<td style="color:var(--primary);font-weight:700;">${escapeHtml(v.patientName)}</td>` +
+          `<td>${v.visitType||'-'}</td><td>${formatDateAr(v.date)}</td></tr>`
+        ).join('');
+      }
+
+      renderWeekdayBars(stats.weekdayCounts);
+      renderChart();
+    }
+
+    function animateNumber(element, target, suffix = '', duration = 500) {
+      if (!element) return;
+      const start = 0;
+      const increment = target / (duration / 16);
+      let current = start;
+      const step = () => {
+        current += increment;
+        if (current >= target) {
+          element.textContent = target + suffix;
+          return;
+        }
+        element.textContent = Math.floor(current) + suffix;
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    }
+
+    // ==================== مخطط تحليلات المواعيد مع إمكانية النقر ====================
+    function renderChart() {
+      const chartContainer = document.getElementById('appointmentsChart');
+      const yAxis = document.getElementById('chartYAxis');
+      if (!chartContainer) return;
+
+      const months = monthsAr;
+      const weeks = ['الأسبوع 1', 'الأسبوع 2', 'الأسبوع 3', 'الأسبوع 4'];
+      const days = daysAr;
+      
+      let labels = months;
+      let data = Array(12).fill(0);
+      let periods = [];
+      
+      const accepted = allRecords.filter(r => r.Status === 'Accepted');
+
+      const now = new Date();
+      const currentYear = now.getFullYear();
+      const currentMonth = now.getMonth();
+      const firstDayOfMonth = new Date(currentYear, currentMonth, 1);
+      const lastDayOfMonth = new Date(currentYear, currentMonth + 1, 0);
+      const daysInMonth = lastDayOfMonth.getDate();
+
+      if (currentChartPeriod === 'weekly') {
+        labels = weeks;
+        data = Array(4).fill(0);
+        periods = [];
+        
+        for (let week = 0; week < 4; week++) {
+          const startDay = week * 7 + 1;
+          const endDay = Math.min((week + 1) * 7, daysInMonth);
+          const startDate = toLocalISODate(new Date(currentYear, currentMonth, startDay));
+          const endDate = toLocalISODate(new Date(currentYear, currentMonth, endDay));
+          periods.push({ label: `الأسبوع ${week + 1}`, start: startDate, end: endDate });
+        }
+
+        accepted.forEach(record => {
+          if (!record.Date) return;
+          const recStr = record.Date.substring(0, 10);
+          if (recStr >= toLocalISODate(firstDayOfMonth) && recStr <= toLocalISODate(lastDayOfMonth)) {
+            const day = parseInt(recStr.substring(8, 10), 10);
+            const weekNum = Math.floor((day - 1) / 7);
+            if (weekNum >= 0 && weekNum < 4) data[weekNum]++;
+          }
+        });
+      } else if (currentChartPeriod === 'daily') {
+        labels = days;
+        data = Array(7).fill(0);
+        periods = [];
+        
+        const firstDayOfWeek = new Date(now);
+        firstDayOfWeek.setDate(now.getDate() - now.getDay());
+        firstDayOfWeek.setHours(0, 0, 0, 0);
+        
+        for (let d = 0; d < 7; d++) {
+          const dayDate = new Date(firstDayOfWeek);
+          dayDate.setDate(firstDayOfWeek.getDate() + d);
+          periods.push({ label: daysAr[d], date: toLocalISODate(dayDate) });
+        }
+
+        const weekStart = toLocalISODate(firstDayOfWeek);
+        accepted.forEach(record => {
+          if (!record.Date) return;
+          const recStr = record.Date.substring(0, 10);
+          const idx = periods.findIndex(p => p.date === recStr);
+          if (idx >= 0) data[idx]++;
+        });
+      } else { // monthly
+        labels = months;
+        data = Array(12).fill(0);
+        periods = months.map((m, idx) => ({ label: m, month: idx }));
+
+        accepted.forEach(record => {
+          if (!record.Date) return;
+          const month = parseInt(record.Date.substring(5, 7), 10) - 1;
+          if (month >= 0 && month < 12) data[month]++;
+        });
+      }
+      
+      const maxValue = Math.max(...data, 1);
+      
+      yAxis.innerHTML = '';
+      for (let i = 5; i >= 0; i--) {
+        const value = Math.round((maxValue / 5) * i);
+        yAxis.innerHTML += `<span class="y-value">${value}</span>`;
+      }
+
+      chartContainer.innerHTML = labels.map((label, index) => {
+        const height = (data[index] / maxValue) * 200;
+        return `<div class="chart-bar-group" onclick="showColumnDetails(${index})">
+                  <div class="chart-bar" style="height: ${height}px;"></div>
+                  <span class="chart-label">${label.substring(0, 3)}</span>
+                </div>`;
+      }).join('');
+
+      window.__chartData = { periods, data, currentChartPeriod };
+    }
+
+    window.showColumnDetails = function(index) {
+      const chartData = window.__chartData;
+      if (!chartData) return;
+      const period = chartData.periods[index];
+      if (!period) return;
+
+      let total = 0, morning = 0, evening = 0, cancelledCount = 0;
+      const accepted = allRecords.filter(r => r.Status === 'Accepted');
+      const cancelled = allRecords.filter(r => r.Status === 'Cancelled' || r.Status === 'Rejected');
+
+      if (chartData.currentChartPeriod === 'monthly') {
+        const month = period.month;
+        total = accepted.filter(r => new Date(r.Date).getMonth() === month).length;
+        morning = accepted.filter(r => new Date(r.Date).getMonth() === month && (r.Slot||'Morning') === 'Morning').length;
+        evening = accepted.filter(r => new Date(r.Date).getMonth() === month && (r.Slot||'Evening') === 'Evening').length;
+        cancelledCount = cancelled.filter(r => new Date(r.Date).getMonth() === month).length;
+        var title = `تفاصيل شهر ${period.label}`;
+      } else if (chartData.currentChartPeriod === 'weekly') {
+        const start = period.start, end = period.end;
+        total = accepted.filter(r => r.Date >= start && r.Date <= end).length;
+        morning = accepted.filter(r => r.Date >= start && r.Date <= end && (r.Slot||'Morning') === 'Morning').length;
+        evening = accepted.filter(r => r.Date >= start && r.Date <= end && (r.Slot||'Evening') === 'Evening').length;
+        cancelledCount = cancelled.filter(r => r.Date >= start && r.Date <= end).length;
+        var title = `تفاصيل ${period.label}`;
+      } else if (chartData.currentChartPeriod === 'daily') {
+        const date = period.date;
+        total = accepted.filter(r => r.Date === date).length;
+        morning = accepted.filter(r => r.Date === date && (r.Slot||'Morning') === 'Morning').length;
+        evening = accepted.filter(r => r.Date === date && (r.Slot||'Evening') === 'Evening').length;
+        cancelledCount = cancelled.filter(r => r.Date === date).length;
+        var title = `تفاصيل ${period.label} ${formatDateAr(date)}`;
+      }
+
+      document.getElementById('dayDetailsTitle').textContent = title;
+      document.getElementById('dayDetailsContent').innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div style="background:var(--primary-light);border-radius:var(--radius-sm);padding:14px;text-align:center;">
+            <p style="font-size:.82rem;color:var(--text-muted);">إجمالي المواعيد</p>
+            <p style="font-size:2rem;font-weight:800;font-family:'DM Mono',monospace;">${total}</p>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div style="background:var(--amber-light);border-radius:var(--radius-sm);padding:12px;text-align:center;">
+              <p style="font-size:.78rem;color:var(--text-muted);">صباحاً</p>
+              <p style="font-size:1.6rem;font-weight:800;font-family:'DM Mono',monospace;">${morning}</p>
+            </div>
+            <div style="background:#eff6ff;border-radius:var(--radius-sm);padding:12px;text-align:center;">
+              <p style="font-size:.78rem;color:var(--text-muted);">مساءً</p>
+              <p style="font-size:1.6rem;font-weight:800;font-family:'DM Mono',monospace;">${evening}</p>
+            </div>
+          </div>
+          <div style="background:var(--red-light);border-radius:var(--radius-sm);padding:12px;text-align:center;">
+            <p style="font-size:.78rem;color:var(--text-muted);">الملغاة / المرفوضة</p>
+            <p style="font-size:1.6rem;font-weight:800;color:var(--red);font-family:'DM Mono',monospace;">${cancelledCount}</p>
+          </div>
+        </div>`;
+      document.getElementById('dayDetailsModal').classList.remove('hidden');
+    };
+
+    window.updateChartPeriod = function(period) {
+      currentChartPeriod = period;
+      document.querySelectorAll('#statsSection .card-actions .card-btn').forEach(btn => btn.classList.remove('active'));
+      event.target.classList.add('active');
+      renderChart();
+    };
+
+    // showStatInfo is now replaced by openStatDrawer (drawer system)
+    window.showStatInfo = function(type) { openStatDrawer(type); };
+
+    window.closeStatInfoModal = function() { document.getElementById('statInfoModal').classList.add('hidden'); };
+    
+    document.getElementById('statInfoModal')?.addEventListener('click', function(e) {
+      if (e.target === this) this.classList.add('hidden');
+    });
+
+    // ==================== Stat Drawer System ====================
+    let _drawerRows = [];    // all rows for current drawer type
+    let _drawerType = '';
+    let _donutFilter = 'week'; // week | month | all
+    let _donutDrawerSlot = ''; // morning | evening
+
+    window.closeStatDrawer = function() {
+      document.getElementById('statDrawerOverlay').classList.remove('open');
+      document.getElementById('statDrawerPanel').classList.remove('open');
+    };
+
+    // ESC key closes drawer
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') closeStatDrawer();
+    });
+
+    function _getFilteredRecordsForPeriod(filter) {
+      const now = new Date();
+      if (filter === 'week') {
+        const startOfWeek = new Date(now);
+        startOfWeek.setDate(now.getDate() - now.getDay());
+        startOfWeek.setHours(0,0,0,0);
+        const endOfWeek = new Date(startOfWeek);
+        endOfWeek.setDate(startOfWeek.getDate() + 6);
+        const s = toLocalISODate(startOfWeek), e = toLocalISODate(endOfWeek);
+        return allRecords.filter(r => r.Date >= s && r.Date <= e);
+      } else if (filter === 'month') {
+        const prefix = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+        return allRecords.filter(r => r.Date && r.Date.startsWith(prefix));
+      }
+      return allRecords; // all
+    }
+
+    window.setDonutFilter = function(filter, btn) {
+      _donutFilter = filter;
+      document.querySelectorAll('.donut-filter-btn').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      updateDonutChart();
+    };
+
+    function updateDonutChart() {
+      const records = _getFilteredRecordsForPeriod(_donutFilter);
+      const accepted = records.filter(r => ['Accepted','Visited','NoShow'].includes(r.Status));
+      const morningCount = accepted.filter(r => (r.Slot||'Morning') === 'Morning').length;
+      const eveningCount = accepted.filter(r => r.Slot === 'Evening').length;
+      const totalSlot = morningCount + eveningCount;
+      const morningAngle = totalSlot ? (morningCount / totalSlot) * 339.3 : 0;
+      const eveningAngle = totalSlot ? (eveningCount / totalSlot) * 339.3 : 0;
+      document.getElementById('sourceSegment1').setAttribute('stroke-dasharray', `${morningAngle} 339.3`);
+      document.getElementById('sourceSegment2').setAttribute('stroke-dasharray', `${eveningAngle} 339.3`);
+      document.getElementById('sourceSegment2').setAttribute('stroke-dashoffset', -morningAngle);
+      document.getElementById('sourceTotal').textContent = totalSlot;
+      const morningPct = totalSlot ? ((morningCount / totalSlot) * 100).toFixed(1) : '0.0';
+      const eveningPct = totalSlot ? ((eveningCount / totalSlot) * 100).toFixed(1) : '0.0';
+      document.getElementById('sourceLegend').innerHTML = `
+        <div style="display:flex;align-items:center;gap:6px;cursor:pointer;" onclick="openDonutDrawer('morning')">
+          <span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#fbbf24;flex-shrink:0;"></span>
+          <span>صباحي (${morningPct}%)</span>
+          <i class="fas fa-chevron-left" style="font-size:.6rem;color:var(--text-muted);margin-right:2px;"></i>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;cursor:pointer;" onclick="openDonutDrawer('evening')">
+          <span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:#3b82f6;flex-shrink:0;"></span>
+          <span>مسائي (${eveningPct}%)</span>
+          <i class="fas fa-chevron-left" style="font-size:.6rem;color:var(--text-muted);margin-right:2px;"></i>
+        </div>
+      `;
+    }
+
+    window.openDonutDrawer = function(slot) {
+      _donutDrawerSlot = slot;
+      const filterLabel = { week: 'هذا الأسبوع', month: 'هذا الشهر', all: 'كل الوقت' }[_donutFilter];
+      const isM = slot === 'morning';
+      const records = _getFilteredRecordsForPeriod(_donutFilter);
+      const filtered = records.filter(r =>
+        ['Accepted','Visited','NoShow'].includes(r.Status) &&
+        (isM ? (r.Slot||'Morning') === 'Morning' : r.Slot === 'Evening')
+      ).sort((a,b) => (b.Date||'').localeCompare(a.Date||''));
+
+      _drawerRows = filtered;
+      _drawerType = 'donut_' + slot;
+
+      const icon = isM ? 'fa-sun' : 'fa-moon';
+      const color = isM ? '#fbbf24' : '#3b82f6';
+      const title = isM ? 'المواعيد الصباحية' : 'المواعيد المسائية';
+
+      _openDrawer({
+        icon, color, title,
+        count: filtered.length,
+        filterLabel,
+        rows: filtered,
+        columns: [],
+        rowBuilder: (r) => {
+          const statusMap = {
+            Accepted: { label: 'مؤكد', bg: 'var(--primary-light)', color: 'var(--primary)', icon: 'fa-calendar-check', accent: 'var(--primary)', accentLight: 'var(--primary-light)' },
+            Visited:  { label: 'تمت الزيارة', bg: '#dcfce7', color: '#16a34a', icon: 'fa-check-circle', accent: '#16a34a', accentLight: '#dcfce7' },
+            NoShow:   { label: 'لم يحضر', bg: '#fee2e2', color: '#dc2626', icon: 'fa-user-times', accent: '#dc2626', accentLight: '#fee2e2' },
+          };
+          const s = statusMap[r.Status] || statusMap.Accepted;
+          const initials = (r.PatientName||'؟').split(' ').map(w=>w[0]).slice(0,2).join('');
+          const slotIcon = isM ? '<span class="dpc-meta-chip" style="background:#fef3c7;color:#d97706;border-color:#fde68a;"><i class="fas fa-sun" style="color:#d97706;"></i>صباحاً</span>' : '<span class="dpc-meta-chip" style="background:#ede9fe;color:#7c3aed;border-color:#ddd6fe;"><i class="fas fa-moon" style="color:#7c3aed;"></i>مساءً</span>';
+          return `<div class="drawer-patient-card" style="--card-accent:${s.accent};--card-accent-light:${s.accentLight};">
+            <div class="dpc-top">
+              <div class="dpc-avatar">${initials}</div>
+              <div class="dpc-name-wrap">
+                <div class="dpc-name">${escapeHtml(r.PatientName||'-')}</div>
+              </div>
+              <span class="dpc-badge" style="background:${s.bg};color:${s.color};">
+                <i class="fas ${s.icon}"></i>${s.label}
+              </span>
+            </div>
+            <div class="dpc-meta">
+              <span class="dpc-meta-chip"><i class="fas fa-calendar"></i>${formatDateAr(r.Date)}</span>
+              ${slotIcon}
+              ${r.VisitType ? `<span class="dpc-meta-chip"><i class="fas fa-stethoscope"></i>${escapeHtml(r.VisitType)}</span>` : ''}
+            </div>
+          </div>`;
+        }
+      });
+    };
+
+    window.openStatDrawer = function(type) {
+      _drawerType = type;
+      document.getElementById('drawerSearchInput').value = '';
+
+      const configs = {
+        total: {
+          icon: 'fa-clipboard-list', color: 'var(--primary)',
+          title: 'إجمالي الزيارات',
+          getData: () => allRecords.filter(r => ['Accepted','Visited','NoShow'].includes(r.Status))
+            .sort((a,b) => (b.Date||'').localeCompare(a.Date||'')),
+          columns: [],
+          rowBuilder: (r) => {
+            const statusMap = {
+              Accepted: { label: 'مؤكد', bg: 'var(--primary-light)', color: 'var(--primary)', icon: 'fa-calendar-check', accent: 'var(--primary)', accentLight: 'var(--primary-light)' },
+              Visited:  { label: 'تمت الزيارة', bg: '#dcfce7', color: '#16a34a', icon: 'fa-check-circle', accent: '#16a34a', accentLight: '#dcfce7' },
+              NoShow:   { label: 'لم يحضر', bg: '#fee2e2', color: '#dc2626', icon: 'fa-user-times', accent: '#dc2626', accentLight: '#fee2e2' },
+            };
+            const s = statusMap[r.Status] || statusMap.Accepted;
+            const initials = (r.PatientName||'؟').split(' ').map(w=>w[0]).slice(0,2).join('');
+            const slotLabel = r.Slot==='Evening' ? '<span class="dpc-meta-chip"><i class="fas fa-moon"></i>مساءً</span>' : '<span class="dpc-meta-chip"><i class="fas fa-sun"></i>صباحاً</span>';
+            return `<div class="drawer-patient-card" style="--card-accent:${s.accent};--card-accent-light:${s.accentLight};">
+              <div class="dpc-top">
+                <div class="dpc-avatar">${initials}</div>
+                <div class="dpc-name-wrap">
+                  <div class="dpc-name">${escapeHtml(r.PatientName||'-')}</div>
+                  ${r.Phone ? `<div class="dpc-phone"><i class="fas fa-phone"></i>${escapeHtml(r.Phone)}</div>` : ''}
+                </div>
+                <span class="dpc-badge" style="background:${s.bg};color:${s.color};">
+                  <i class="fas ${s.icon}"></i>${s.label}
+                </span>
+              </div>
+              <div class="dpc-meta">
+                <span class="dpc-meta-chip"><i class="fas fa-calendar"></i>${formatDateAr(r.Date)}</span>
+                ${slotLabel}
+              </div>
+            </div>`;
+          }
+        },
+        cancelled: {
+          icon: 'fa-ban', color: '#dc2626',
+          title: 'المواعيد الملغاة',
+          getData: () => allRecords.filter(r => r.Status === 'Cancelled' || r.Status === 'Rejected')
+            .sort((a,b) => (b.Date||'').localeCompare(a.Date||'')),
+          columns: [],
+          rowBuilder: (r) => {
+            const initials = (r.PatientName||'؟').split(' ').map(w=>w[0]).slice(0,2).join('');
+            const slotLabel = r.Slot==='Evening' ? '<span class="dpc-meta-chip"><i class="fas fa-moon"></i>مساءً</span>' : '<span class="dpc-meta-chip"><i class="fas fa-sun"></i>صباحاً</span>';
+            return `<div class="drawer-patient-card" style="--card-accent:#dc2626;--card-accent-light:#fee2e2;">
+              <div class="dpc-top">
+                <div class="dpc-avatar">${initials}</div>
+                <div class="dpc-name-wrap">
+                  <div class="dpc-name">${escapeHtml(r.PatientName||'-')}</div>
+                  ${r.Phone ? `<div class="dpc-phone"><i class="fas fa-phone"></i>${escapeHtml(r.Phone)}</div>` : ''}
+                </div>
+                <span class="dpc-badge" style="background:#fee2e2;color:#dc2626;">
+                  <i class="fas fa-ban"></i>ملغى
+                </span>
+              </div>
+              <div class="dpc-meta">
+                <span class="dpc-meta-chip"><i class="fas fa-calendar-xmark"></i>${formatDateAr(r.Date)}</span>
+                ${slotLabel}
+              </div>
+            </div>`;
+          }
+        },
+        noshow: {
+          icon: 'fa-user-slash', color: '#ea580c',
+          title: 'سجل الغياب — لم يحضر',
+          getData: () => allRecords.filter(r => r.Status === 'NoShow')
+            .sort((a,b) => (b.Date||'').localeCompare(a.Date||'')),
+          columns: [],
+          rowBuilder: (r) => {
+            const initials = (r.PatientName||'؟').split(' ').map(w=>w[0]).slice(0,2).join('');
+            const slotLabel = r.Slot==='Evening' ? '<span class="dpc-meta-chip"><i class="fas fa-moon"></i>مساءً</span>' : '<span class="dpc-meta-chip"><i class="fas fa-sun"></i>صباحاً</span>';
+            return `<div class="drawer-patient-card" style="--card-accent:#ea580c;--card-accent-light:#ffedd5;">
+              <div class="dpc-top">
+                <div class="dpc-avatar">${initials}</div>
+                <div class="dpc-name-wrap">
+                  <div class="dpc-name">${escapeHtml(r.PatientName||'-')}</div>
+                  ${r.Phone ? `<div class="dpc-phone"><i class="fas fa-phone"></i>${escapeHtml(r.Phone)}</div>` : ''}
+                </div>
+                <span class="dpc-badge" style="background:#ffedd5;color:#ea580c;">
+                  <i class="fas fa-user-slash"></i>غائب
+                </span>
+              </div>
+              <div class="dpc-meta">
+                <span class="dpc-meta-chip"><i class="fas fa-calendar"></i>${formatDateAr(r.Date)}</span>
+                ${slotLabel}
+                ${r.VisitType ? `<span class="dpc-meta-chip"><i class="fas fa-stethoscope"></i>${escapeHtml(r.VisitType)}</span>` : ''}
+              </div>
+            </div>`;
+          }
+        },
+        repeat: {
+          icon: 'fa-arrow-trend-up', color: '#16a34a',
+          title: 'المرضى المتكررون',
+          getData: () => {
+            const map = {};
+            allRecords.filter(r => ['Accepted','Visited'].includes(r.Status)).forEach(r => {
+              const k = r.PatientName||'';
+              if (!map[k]) map[k] = { name: k, phone: r.Phone||'', count: 0, last: '' };
+              map[k].count++;
+              if (r.Date > map[k].last) map[k].last = r.Date;
+            });
+            return Object.values(map).filter(p => p.count > 1).sort((a,b) => b.count - a.count);
+          },
+          columns: [],
+          rowBuilder: (r) => {
+            const initials = (r.name||'؟').split(' ').map(w=>w[0]).slice(0,2).join('');
+            return `<div class="drawer-patient-card" style="--card-accent:#16a34a;--card-accent-light:#dcfce7;">
+              <div class="dpc-top">
+                <div class="dpc-avatar">${initials}</div>
+                <div class="dpc-name-wrap">
+                  <div class="dpc-name">${escapeHtml(r.name||'-')}</div>
+                  ${r.phone ? `<div class="dpc-phone"><i class="fas fa-phone"></i>${escapeHtml(r.phone)}</div>` : ''}
+                </div>
+                <div class="dpc-count-badge" style="background:#dcfce7;color:#16a34a;border-color:#bbf7d0;">${r.count}</div>
+              </div>
+              <div class="dpc-meta">
+                <span class="dpc-meta-chip"><i class="fas fa-clock-rotate-left"></i>آخر زيارة: ${formatDateAr(r.last)}</span>
+                <span class="dpc-meta-chip" style="background:#dcfce7;color:#16a34a;border-color:#bbf7d0;"><i class="fas fa-repeat" style="color:#16a34a;"></i>${r.count} زيارات</span>
+              </div>
+            </div>`;
+          }
+        },
+        avgDaily: {
+          icon: 'fa-chart-line', color: 'var(--primary)',
+          title: 'توزيع الزيارات اليومي',
+          getData: () => {
+            const dayMap = {};
+            allRecords.filter(r => ['Accepted','Visited'].includes(r.Status)).forEach(r => {
+              if (!r.Date) return;
+              const d = r.Date.substring(0,10);
+              if (!dayMap[d]) dayMap[d] = { date: d, count: 0, morning: 0, evening: 0 };
+              dayMap[d].count++;
+              if ((r.Slot||'Morning') === 'Morning') dayMap[d].morning++;
+              else dayMap[d].evening++;
+            });
+            return Object.values(dayMap).sort((a,b) => b.date.localeCompare(a.date));
+          },
+          columns: [],
+          rowBuilder: (r) => {
+            const dateParts = r.date ? r.date.split('-') : [];
+            const dayNum = dateParts[2] ? parseInt(dateParts[2]) : '--';
+            const monthsArShort = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+            const monthLabel = dateParts[1] ? monthsArShort[parseInt(dateParts[1])-1] : '';
+            return `<div class="drawer-day-card">
+              <div class="ddc-date-box">
+                <div class="ddc-date-day">${dayNum}</div>
+                <div class="ddc-date-month">${monthLabel}</div>
+              </div>
+              <div class="ddc-info">
+                <div class="ddc-total">إجمالي الزيارات: <span class="ddc-total-num">${r.count}</span></div>
+                <div class="ddc-slots">
+                  <span class="ddc-slot morning"><i class="fas fa-sun"></i>صباح: ${r.morning}</span>
+                  <span class="ddc-slot evening"><i class="fas fa-moon"></i>مساء: ${r.evening}</span>
+                </div>
+              </div>
+            </div>`;
+          }
+        },
+        thismonth: {
+          icon: 'fa-calendar-check', color: '#2563eb',
+          title: 'زيارات هذا الشهر',
+          getData: () => {
+            const now = new Date();
+            const prefix = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+            return allRecords.filter(r => ['Accepted','Visited','NoShow'].includes(r.Status) && r.Date && r.Date.startsWith(prefix))
+              .sort((a,b) => (b.Date||'').localeCompare(a.Date||''));
+          },
+          columns: [],
+          rowBuilder: (r) => {
+            const statusMap = {
+              Accepted: { label: 'مؤكد', bg: 'var(--primary-light)', color: 'var(--primary)', icon: 'fa-calendar-check', accent: 'var(--primary)', accentLight: 'var(--primary-light)' },
+              Visited:  { label: 'تمت الزيارة', bg: '#dcfce7', color: '#16a34a', icon: 'fa-check-circle', accent: '#16a34a', accentLight: '#dcfce7' },
+              NoShow:   { label: 'لم يحضر', bg: '#fee2e2', color: '#dc2626', icon: 'fa-user-times', accent: '#dc2626', accentLight: '#fee2e2' },
+            };
+            const s = statusMap[r.Status] || statusMap.Accepted;
+            const initials = (r.PatientName||'؟').split(' ').map(w=>w[0]).slice(0,2).join('');
+            const slotLabel = r.Slot==='Evening' ? '<span class="dpc-meta-chip"><i class="fas fa-moon"></i>مساءً</span>' : '<span class="dpc-meta-chip"><i class="fas fa-sun"></i>صباحاً</span>';
+            return `<div class="drawer-patient-card" style="--card-accent:${s.accent};--card-accent-light:${s.accentLight};">
+              <div class="dpc-top">
+                <div class="dpc-avatar">${initials}</div>
+                <div class="dpc-name-wrap">
+                  <div class="dpc-name">${escapeHtml(r.PatientName||'-')}</div>
+                </div>
+                <span class="dpc-badge" style="background:${s.bg};color:${s.color};">
+                  <i class="fas ${s.icon}"></i>${s.label}
+                </span>
+              </div>
+              <div class="dpc-meta">
+                <span class="dpc-meta-chip"><i class="fas fa-calendar"></i>${formatDateAr(r.Date)}</span>
+                ${slotLabel}
+                ${r.VisitType ? `<span class="dpc-meta-chip"><i class="fas fa-stethoscope"></i>${escapeHtml(r.VisitType)}</span>` : ''}
+              </div>
+            </div>`;
+          }
+        },
+      };
+
+      const cfg = configs[type];
+      if (!cfg) return;
+      const rows = cfg.getData();
+      _drawerRows = rows;
+
+      _openDrawer({
+        icon: cfg.icon, color: cfg.color, title: cfg.title,
+        count: rows.length, rows, columns: cfg.columns, rowBuilder: cfg.rowBuilder
+      });
+    };
+
+    function _openDrawer({ icon, color, title, count, rows, columns, rowBuilder }) {
+      const iconWrap = document.getElementById('drawerIconWrap');
+      iconWrap.style.background = color + '22';
+      iconWrap.style.border = '1.5px solid ' + color + '44';
+      const drawerIcon = document.getElementById('drawerIcon');
+      drawerIcon.className = 'fas ' + icon;
+      drawerIcon.style.color = color;
+
+      document.getElementById('drawerTitle').textContent = title;
+      document.getElementById('drawerCount').textContent = count;
+      document.getElementById('drawerCount').style.color = color;
+      document.getElementById('drawerFilters').innerHTML = '';
+
+      _renderDrawerTable(rows, columns, rowBuilder);
+
+      // store for search
+      window._drawerCfg = { rows, columns, rowBuilder };
+
+      document.getElementById('statDrawerOverlay').classList.add('open');
+      document.getElementById('statDrawerPanel').classList.add('open');
+    }
+
+    function _renderDrawerTable(rows, columns, rowBuilder) {
+      const body = document.getElementById('drawerBody');
+      if (!rows.length) {
+        body.innerHTML = `<div class="drawer-empty"><i class="fas fa-inbox"></i><p>لا توجد بيانات</p></div>`;
+        return;
+      }
+      const cards = rows.map((r, i) => `<div class="drawer-card-item" data-idx="${i}">${rowBuilder(r)}</div>`).join('');
+      body.innerHTML = `<div class="drawer-cards-list">${cards}</div>`;
+    }
+
+    window.filterDrawerRows = function(query) {
+      const cfg = window._drawerCfg;
+      if (!cfg) return;
+      const q = query.trim().toLowerCase();
+      if (!q) {
+        _renderDrawerTable(cfg.rows, cfg.columns, cfg.rowBuilder);
+        document.getElementById('drawerCount').textContent = cfg.rows.length;
+        return;
+      }
+      // Search by serializing the row to text
+      const filtered = cfg.rows.filter(r => {
+        const text = JSON.stringify(r).toLowerCase();
+        return text.includes(q);
+      });
+      _renderDrawerTable(filtered, cfg.columns, cfg.rowBuilder);
+      document.getElementById('drawerCount').textContent = filtered.length;
+    };
+
+    // ==================== التقويم ====================
+    function renderCalendar() {
+      const grid = document.getElementById('calendarGrid');
+      if (!grid) return;
+      grid.innerHTML = '';
+      const year = currentDate.getFullYear(), month = currentDate.getMonth();
+      document.getElementById('currentMonth').textContent = `${monthsAr[month]} ${year}`;
+      const firstDay = new Date(year, month, 1).getDay();
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      let startOffset = (firstDay + 2) % 7;
+      for (let i = startOffset - 1; i >= 0; i--) { 
+        const d = document.createElement('div'); 
+        d.className = 'compact-calendar-day other-month'; 
+        d.textContent = ''; 
+        grid.appendChild(d); 
+      }
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dateObj = new Date(year, month, d); dateObj.setHours(0,0,0,0);
+        const dateStr = toLocalISODate(dateObj);
+        const dayDiv = document.createElement('div'); 
+        dayDiv.className = 'compact-calendar-day'; 
+        dayDiv.textContent = d;
+        
+        if (dateObj < today) dayDiv.classList.add('past-day');
+        if (dateObj.getTime() === today.getTime()) dayDiv.classList.add('today');
+        if (selectedDayStr === dateStr) dayDiv.classList.add('selected');
+        
+        // تمكين الضغط على جميع الأيام بما فيها الماضية
+        dayDiv.addEventListener('click', () => selectDay(dateStr));
+        
+        // عرض نقاط المواعيد لجميع الأيام (الماضية والمستقبلية)
+        const dayRecords = allRecords.filter(r => 
+          ['Accepted', 'Visited', 'NoShow'].includes(r.Status) && r.Date === dateStr
+        );
+        const acceptedCount = dayRecords.length;
+        
+        if (acceptedCount > 0) {
+          const dot = document.createElement('div');
+          dot.className = `compact-appointment-dot ${acceptedCount <=2 ? 'compact-dot-low' : acceptedCount <=4 ? 'compact-dot-medium' : 'compact-dot-high'}`;
+          dayDiv.appendChild(dot);
+        }
+        grid.appendChild(dayDiv);
+      }
+    }
+
+    function selectDay(dateStr) {
+      selectedDayStr = dateStr;
+      // افتح اليوم المختار تلقائياً في جدول الأسبوع
+      var _p = dateStr.split('-');
+      schedRefDate = new Date(+_p[0], (+_p[1]) - 1, +_p[2]);
+      renderCalendar();
+      renderAgendaForDay(dateStr);
+      renderCalMobileAgenda(dateStr);
+      if (typeof setScheduleView === 'function') setScheduleView('week');
+      else if (typeof renderScheduleGrid === 'function') renderScheduleGrid();
+    }
+
+    // قائمة مواعيد اليوم المختار في قسم الروزنامة (الموبايل)
+    function renderCalMobileAgenda(dateStr) {
+      var box = document.getElementById('calMobileAgenda'); if (!box) return;
+      dateStr = dateStr || selectedDayStr || todayStr;
+      var isPast  = parseLocalISODate(dateStr) < today;
+      var isToday = dateStr === todayStr;
+      var recs;
+      if (isPast)       recs = allRecords.filter(function(r){ return ['Accepted','Visited','NoShow','Cancelled','Rejected'].includes(r.Status) && normalizeDate(r.Date) === dateStr; });
+      else if (isToday) recs = allRecords.filter(function(r){ return ['Accepted','Visited','NoShow'].includes(r.Status) && normalizeDate(r.Date) === dateStr; });
+      else              recs = allRecords.filter(function(r){ return r.Status === 'Accepted' && normalizeDate(r.Date) === dateStr; });
+      recs = recs.slice().sort(function(a,b){ return slotMinutes(slotTimeOf(a)) - slotMinutes(slotTimeOf(b)); });
+      var head = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+        + '<h3 style="font-weight:800;font-size:.85rem;color:var(--text-primary);margin:0;">' + daysAr[parseLocalISODate(dateStr).getDay()] + ' — ' + formatDateAr(dateStr) + '</h3>'
+        + '<span style="font-size:.7rem;color:var(--text-muted);font-weight:600;">' + recs.length + ' موعد</span></div>';
+      var body = recs.length
+        ? '<div class="ac-scroll" style="display:flex;flex-direction:column;gap:8px;">' + recs.map(homeApptCard).join('') + '</div>'
+        : '<div style="text-align:center;padding:18px 0;color:var(--text-muted);font-size:.85rem;"><i class="far fa-calendar-check" style="font-size:1.4rem;display:block;margin-bottom:8px;opacity:.4;"></i>لا مواعيد في هذا اليوم</div>';
+      box.innerHTML = head + body;
+    }
+
+    // ================== Slot Helpers (تحويل صباحي/مسائي → ساعات) ==================
+    function convertLegacySlotToTime(slot) {
+      if (slot === 'Morning') return '09:00';
+      if (slot === 'Evening') return '14:00';
+      if (!slot || slot === 'Unknown') return '09:00';
+      return slot; // أصلاً وقت مثل "09:00"
+    }
+    function slotTimeOf(record) {
+      if (!record) return '09:00';
+      const raw = (record.Slot != null && record.Slot !== '') ? record.Slot
+                : (record.slot != null && record.slot !== '') ? record.slot : '';
+      return convertLegacySlotToTime(raw);
+    }
+    function slotMinutes(t) {
+      const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ''));
+      return m ? (parseInt(m[1],10) * 60 + parseInt(m[2],10)) : 0;
+    }
+    function slotLabelOf(record) { return slotTimeOf(record); }
+
+    // ================== Schedule Grid (شبكة ساعات يومي/أسبوعي) — قراءة فقط ==================
+    const SCHED_START_HOUR = 6, SCHED_END_HOUR = 24;
+    let   SCHED_HOUR_PX    = 56;
+    const SCHED_HOUR_PX_MIN = 34, SCHED_HOUR_PX_MAX = 120;
+    window.schedZoom = function(dir) {
+      SCHED_HOUR_PX = Math.max(SCHED_HOUR_PX_MIN, Math.min(SCHED_HOUR_PX_MAX, SCHED_HOUR_PX + dir * 12));
+      renderScheduleGrid();
+    };
+    const SCHED_EN_DAYS   = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+    const SCHED_EN_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    let scheduleView = (window.innerWidth < 820) ? 'day' : 'week';
+    let schedRefDate = new Date(today);
+
+    function weekStartSun(d) { const x = new Date(d); x.setHours(0,0,0,0); x.setDate(x.getDate() - x.getDay()); return x; }
+    function fmtSchedHour(h) { const h24 = h % 24; const ap = h24 < 12 ? 'AM' : 'PM'; let hh = h24 % 12; if (hh === 0) hh = 12; return ap + ' ' + hh; }
+    function schedFmtRange(days) {
+      const M = SCHED_EN_MONTHS;
+      if (days.length === 1) { const d = days[0]; return M[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getFullYear(); }
+      const a = days[0], b = days[days.length - 1];
+      return M[a.getMonth()] + ' ' + a.getDate() + ' - ' + M[b.getMonth()] + ' ' + b.getDate() + ', ' + b.getFullYear();
+    }
+    function schedStatusColor(r) {
+      if (r.Status === 'NoShow')  return { bg:'#fee2e2', bd:'#ef4444', tx:'#991b1b' };
+      if (r.Status === 'Visited') return { bg:'#dcfce7', bd:'#16a34a', tx:'#166534' };
+      const t = r.VisitType || '';
+      if (t.indexOf('تحاليل') !== -1 || t.indexOf('تحليل') !== -1) return { bg:'#dbeafe', bd:'#2563eb', tx:'#1e40af' };
+      if (t.indexOf('مراجعة') !== -1)                              return { bg:'#fef9c3', bd:'#f59e0b', tx:'#92400e' };
+      if (t.indexOf('كشف') !== -1 || t.indexOf('جديد') !== -1)     return { bg:'#ede9fe', bd:'#7c3aed', tx:'#5b21b6' };
+      return { bg:'#f1f5f9', bd:'#94a3b8', tx:'#475569' };
+    }
+    window.setScheduleView = function(v) {
+      scheduleView = v;
+      document.getElementById('schedDayBtn').classList.toggle('active', v === 'day');
+      document.getElementById('schedWeekBtn').classList.toggle('active', v === 'week');
+      renderScheduleGrid();
+    };
+    window.schedNav = function(dir) {
+      const step = scheduleView === 'week' ? 7 : 1;
+      schedRefDate.setDate(schedRefDate.getDate() + dir * step);
+      renderScheduleGrid();
+    };
+    window.schedToday = function() {
+      schedRefDate = new Date(today); selectedDayStr = todayStr;
+      renderScheduleGrid(); renderCalendar();
+    };
+    window.schedPickDay = function(ds) { selectDay(ds); };
+    // قراءة فقط: النقر على البطاقة يفتح التفاصيل فقط (لا تعديل/حجز)
+    window.schedCardClick = function(id) { openAppointmentDetailsModal(id); };
+
+    function renderScheduleGrid() {
+      const host = document.getElementById('scheduleGrid'); if (!host) return;
+      let days = [];
+      if (scheduleView === 'week') {
+        const start = weekStartSun(schedRefDate);
+        for (let i = 0; i < 7; i++) { const d = new Date(start); d.setDate(d.getDate() + i); d.setHours(0,0,0,0); days.push(d); }
+      } else { const d = new Date(schedRefDate); d.setHours(0,0,0,0); days = [d]; }
+      const lbl = document.getElementById('schedRangeLabel');
+      if (lbl) lbl.textContent = schedFmtRange(days);
+      const visDays = days;
+      const totalH = SCHED_END_HOUR - SCHED_START_HOUR;
+      const bodyH  = totalH * SCHED_HOUR_PX;
+      const nCols  = visDays.length;
+      const colMin = (scheduleView === 'week') ? 88 : 0;
+      const colsTemplate = '56px repeat(' + nCols + ',minmax(' + colMin + 'px,1fr))';
+      const nowMins = (new Date()).getHours() * 60 + (new Date()).getMinutes();
+
+      let head = '<div class="sched-head-row" style="display:grid;grid-template-columns:' + colsTemplate + ';">';
+      head += '<div class="sched-head-cell" style="font-size:.52rem;letter-spacing:1px;color:var(--text-muted);display:flex;align-items:flex-end;justify-content:center;padding-bottom:8px;font-family:var(--font-num);">GMT+3</div>';
+      visDays.forEach(function(d) {
+        const ds = toLocalISODate(d);
+        const isToday = d.getTime() === today.getTime();
+        const numCls  = isToday ? 'sched-head-num today' : 'sched-head-num';
+        const cellCls = isToday ? 'sched-head-cell clickable is-today' : 'sched-head-cell clickable';
+        head += '<div class="' + cellCls + '" onclick="schedPickDay(\'' + ds + '\')">'
+              + '<div class="sched-head-name">' + SCHED_EN_DAYS[d.getDay()] + '</div>'
+              + '<div class="' + numCls + '">' + d.getDate() + '</div></div>';
+      });
+      head += '</div>';
+
+      let body = '<div style="display:grid;grid-template-columns:' + colsTemplate + ';padding:11px 0;">';
+      let gutter = '<div style="position:relative;height:' + bodyH + 'px;">';
+      for (let h = SCHED_START_HOUR; h <= SCHED_END_HOUR; h++) {
+        const h24 = h % 24, ap = h24 < 12 ? 'AM' : 'PM';
+        let hh = h24 % 12; if (hh === 0) hh = 12;
+        gutter += '<div class="sched-gutter-lbl" style="top:' + ((h - SCHED_START_HOUR) * SCHED_HOUR_PX) + 'px;">' + hh + '<span class="sched-mer">' + ap + '</span></div>';
+      }
+      gutter += '</div>';
+      body += gutter;
+      visDays.forEach(function(d) {
+        const ds = toLocalISODate(d);
+        const closed = isDayClosed(ds);
+        const recs = (allRecords || []).filter(function(r) {
+          return (r.Status === 'Accepted' || r.Status === 'InProgress' || r.Status === 'Pending' || r.Status === 'Visited' || r.Status === 'NoShow')
+                 && normalizeDate(r.Date) === ds;
+        });
+        const groups = {};
+        recs.forEach(function(r) { const m = slotMinutes(slotTimeOf(r)); (groups[m] = groups[m] || []).push(r); });
+        let cells = '';
+        Object.keys(groups).forEach(function(mk) {
+          const list = groups[mk]; const m = parseInt(mk, 10);
+          const top = (m - SCHED_START_HOUR * 60) / 60 * SCHED_HOUR_PX;
+          if (top < 0 || top > bodyH) return;
+          const cardH = Math.max(SCHED_HOUR_PX * 0.5 - 3, 24);
+          list.forEach(function(r, i) {
+            const w = 100 / list.length, left = i * w;
+            const c = schedStatusColor(r);
+            cells += '<div class="sched-appt" style="top:' + top + 'px;height:' + cardH + 'px;left:calc(' + left + '% + 2px);width:calc(' + w + '% - 4px);background:' + c.bg + ';border-color:' + c.bd + ';color:' + c.tx + ';" onclick="schedCardClick(\'' + r.id + '\')" oncontextmenu="event.preventDefault();openChartFromAppt(\'' + r.id + '\');return false;" title="كليك يمين: فتح إضبارة المريض">'
+                  + '<div class="sched-appt-name">' + escapeHtml(r.PatientName || '') + '</div>'
+                  + '<div class="sched-appt-time">' + slotLabelOf(r) + '</div></div>';
+          });
+        });
+        let nowLine = '';
+        const isTodayCol = d.getTime() === today.getTime();
+        if (isTodayCol && nowMins >= SCHED_START_HOUR * 60 && nowMins <= SCHED_END_HOUR * 60) {
+          nowLine = '<div class="sched-now-line" style="top:' + ((nowMins - SCHED_START_HOUR * 60) / 60 * SCHED_HOUR_PX) + 'px;"></div>';
+        }
+        const halfPx = SCHED_HOUR_PX / 2;
+        const hourGrad = 'repeating-linear-gradient(180deg,var(--grid-line) 0,var(--grid-line) 1px,transparent 1px,transparent ' + SCHED_HOUR_PX + 'px)';
+        const halfGrad = 'repeating-linear-gradient(180deg,transparent 0,transparent ' + (halfPx - 1) + 'px,var(--grid-line-soft) ' + (halfPx - 1) + 'px,var(--grid-line-soft) ' + halfPx + 'px,transparent ' + halfPx + 'px,transparent ' + SCHED_HOUR_PX + 'px)';
+        let bg = hourGrad + ',' + halfGrad;
+        if (closed) bg += ',repeating-linear-gradient(45deg,rgba(239,68,68,.09),rgba(239,68,68,.09) 7px,transparent 7px,transparent 14px)';
+        const colCls = isTodayCol ? 'sched-daycol today-col' : 'sched-daycol';
+        body += '<div class="' + colCls + '" data-ds="' + ds + '" style="height:' + bodyH + 'px;background-image:' + bg + ';">' + cells + nowLine + '</div>';
+      });
+      body += '</div>';
+      host.innerHTML = head + body;
+    }
+    
+    window.goToToday = function() {
+      currentDate = new Date(today);
+      const todayStr = toLocalISODate(today);
+      selectedDayStr = todayStr;
+      setActiveSection('calendar');
+      renderCalendar();
+      renderAgendaForDay(todayStr);
+    };
+    
+    window.showDayDetails = function() {
+      if (!selectedDayStr) return;
+      const dateStr = selectedDayStr;
+      const normDate = (d) => (d||'').toString().trim().substring(0,10);
+      
+      // جلب جميع المواعيد الفعالة (مقبولة، تمت الزيارة، أو لم يحضر)
+      const activeRecords = allRecords.filter(r => 
+        ['Accepted', 'Visited', 'NoShow'].includes(r.Status) && normDate(r.Date) === dateStr
+      );
+      
+      // جلب المواعيد الملغاة أو المرفوضة
+      const cancelled = allRecords.filter(r => 
+        (r.Status === 'Cancelled' || r.Status === 'Rejected') && normDate(r.Date) === dateStr
+      );
+      
+      const total = activeRecords.length + cancelled.length;
+      const morning = activeRecords.filter(r => (r.Slot||'Morning') === 'Morning').length;
+      const evening = activeRecords.filter(r => (r.Slot||'Evening') === 'Evening').length;
+      const cancelledCount = cancelled.length;
+
+      document.getElementById('dayDetailsTitle').textContent = `تفاصيل ${formatDateAr(dateStr)}`;
+      document.getElementById('dayDetailsContent').innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div style="background:var(--primary-light);border-radius:var(--radius-sm);padding:14px;text-align:center;">
+            <p style="font-size:.82rem;color:var(--text-muted);">إجمالي المواعيد</p>
+            <p style="font-size:2rem;font-weight:800;font-family:'DM Mono',monospace;">${total}</p>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div style="background:var(--amber-light);border-radius:var(--radius-sm);padding:12px;text-align:center;">
+              <p style="font-size:.78rem;color:var(--text-muted);">صباحاً</p>
+              <p style="font-size:1.6rem;font-weight:800;font-family:'DM Mono',monospace;">${morning}</p>
+            </div>
+            <div style="background:#eff6ff;border-radius:var(--radius-sm);padding:12px;text-align:center;">
+              <p style="font-size:.78rem;color:var(--text-muted);">مساءً</p>
+              <p style="font-size:1.6rem;font-weight:800;font-family:'DM Mono',monospace;">${evening}</p>
+            </div>
+          </div>
+          <div style="background:var(--red-light);border-radius:var(--radius-sm);padding:12px;text-align:center;">
+            <p style="font-size:.78rem;color:var(--text-muted);">الملغاة / المرفوضة</p>
+            <p style="font-size:1.6rem;font-weight:800;color:var(--red);font-family:'DM Mono',monospace;">${cancelledCount}</p>
+          </div>
+        </div>`;
+      document.getElementById('dayDetailsModal').classList.remove('hidden');
+    };
+    window.closeDayDetailsModal = function() { document.getElementById('dayDetailsModal').classList.add('hidden'); };
+    function renderAgendaForDay(dateStr) {
+      renderCalMobileAgenda(dateStr); // مواعيد اليوم على الموبايل
+      const isPast = parseLocalISODate(dateStr) < today;
+      document.getElementById('agendaTitle').textContent = `${daysAr[parseLocalISODate(dateStr).getDay()]} — ${formatDateAr(dateStr)}`;
+
+      // إحصائيات اليوم المختار (تتبع الروزنامة): مواعيد اليوم / متبقية / زاروا / لم يحضروا
+      (function() {
+        const dayRecs = (allRecords || []).filter(r => r.Date === dateStr);
+        const acc = dayRecs.filter(r => r.Status === 'Accepted').length;
+        const vis = dayRecs.filter(r => r.Status === 'Visited').length;
+        const abs = dayRecs.filter(r => r.Status === 'NoShow').length;
+        const setS = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+        setS('calStatTotal', acc + vis + abs);
+        setS('calStatRem',   acc);
+        setS('calStatVis',   vis);
+        setS('calStatAbs',   abs);
+      })();
+
+      const emptyMsg = (slot) => `<div style="text-align:center; padding:16px 0; color:var(--text-muted); font-size:.85rem; font-weight:500;">لا توجد مواعيد ${slot}</div>`;
+
+      if (isPast) {
+        // الأيام السابقة: عرض جميع الحالات (حضر، لم يحضر، ملغاة)
+        const accepted   = allRecords.filter(r => r.Status === 'Accepted'  && r.Date === dateStr);
+        const visited    = allRecords.filter(r => r.Status === 'Visited'   && r.Date === dateStr);
+        const noShow     = allRecords.filter(r => r.Status === 'NoShow'    && r.Date === dateStr);
+        const cancelled  = allRecords.filter(r => (r.Status === 'Cancelled' || r.Status === 'Rejected') && r.Date === dateStr);
+
+        const allDayRecords = [...accepted, ...visited, ...noShow, ...cancelled];
+        const morning = allDayRecords.filter(r => (r.Slot || 'Morning') === 'Morning');
+        const evening = allDayRecords.filter(r =>  r.Slot === 'Evening');
+
+        const totalShown = visited.length + accepted.length;
+        const summary = `زيارات: ${totalShown}${noShow.length ? ' · لم يحضر: ' + noShow.length : ''}${cancelled.length ? ' · ملغاة: ' + cancelled.length : ''}`;
+        document.getElementById('agendaCount').textContent = summary;
+        document.getElementById('agendaMorningCount').textContent = morning.length;
+        document.getElementById('agendaEveningCount').textContent = evening.length;
+
+        const pastAgendaCard = (r) => {
+          let badgeBg, badgeColor, badgeBorder, badgeIcon, badgeText;
+          if (r.Status === 'Visited') {
+            badgeBg = '#dcfce7'; badgeColor = '#16a34a'; badgeBorder = '#86efac';
+            badgeIcon = 'fa-check-circle'; badgeText = 'تمت الزيارة';
+          } else if (r.Status === 'NoShow') {
+            badgeBg = '#fee2e2'; badgeColor = '#dc2626'; badgeBorder = '#fca5a5';
+            badgeIcon = 'fa-user-times'; badgeText = 'لم يحضر';
+          } else if (r.Status === 'Cancelled' || r.Status === 'Rejected') {
+            badgeBg = '#fef3c7'; badgeColor = '#d97706'; badgeBorder = '#fde68a';
+            badgeIcon = 'fa-ban'; badgeText = 'تم الإلغاء';
+          } else {
+            // Accepted but past (لم يُغلق اليوم) — نعرضه كموعد مؤكد قديم
+            badgeBg = 'var(--primary-light)'; badgeColor = 'var(--primary)'; badgeBorder = 'var(--border-strong)';
+            badgeIcon = 'fa-calendar-check'; badgeText = 'مؤكد';
+          }
+          return `<div style="background:var(--primary-faint);border:1.5px solid ${badgeBorder};border-radius:12px;padding:12px;margin-bottom:8px;opacity:.88;">
+            <div class="flex justify-between items-start">
+              <div>
+                <p class="font-bold" style="color:var(--text-primary)">${r.PatientName}</p>
+                <p class="text-xs mt-1" style="color:var(--primary)">${r.Phone}</p>
+              </div>
+              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+                <span style="font-size:.72rem;padding:3px 10px;border-radius:20px;font-weight:700;background:${badgeBg};color:${badgeColor};border:1px solid ${badgeBorder};">
+                  <i class="fas ${badgeIcon}" style="margin-left:3px;font-size:.65rem;"></i>${badgeText}
+                </span>
+                <span style="font-size:.7rem;color:var(--text-muted);">${r.VisitType || ''} · ${r.Slot === 'Evening' ? 'مساءً' : 'صباحاً'}</span>
+              </div>
+            </div>
+          </div>`;
+        };
+
+        document.getElementById('agendaMorning').innerHTML = morning.length ? morning.map(pastAgendaCard).join('') : emptyMsg('صباحية');
+        document.getElementById('agendaEvening').innerHTML = evening.length ? evening.map(pastAgendaCard).join('') : emptyMsg('مسائية');
+
+      } else {
+        // اليوم الحالي أو المستقبل: عرض المواعيد المؤكدة والمكتملة (تمت الزيارة)
+        const accepted = allRecords.filter(r => r.Status === 'Accepted' && r.Date === dateStr);
+        const visited  = allRecords.filter(r => r.Status === 'Visited'  && r.Date === dateStr);
+        const noShow   = allRecords.filter(r => r.Status === 'NoShow'   && r.Date === dateStr);
+        
+        const activeRecords = [...accepted, ...visited, ...noShow];
+        const morning = activeRecords.filter(r => (r.Slot || 'Morning') === 'Morning');
+        const evening = activeRecords.filter(r =>  r.Slot === 'Evening');
+        
+        document.getElementById('agendaCount').textContent = `عدد المواعيد: ${activeRecords.length}`;
+        document.getElementById('agendaMorningCount').textContent = morning.length;
+        document.getElementById('agendaEveningCount').textContent = evening.length;
+        
+        const currentAgendaCard = (r) => {
+          if (r.Status === 'Visited' || r.Status === 'NoShow') {
+            // إذا كانت الزيارة تمت أو لم يحضر، نستخدم نفس شكل البطاقة القديمة (Past Card) لتمييزها
+            let badgeBg, badgeColor, badgeBorder, badgeIcon, badgeText;
+            if (r.Status === 'Visited') {
+              badgeBg = '#dcfce7'; badgeColor = '#16a34a'; badgeBorder = '#86efac';
+              badgeIcon = 'fa-check-circle'; badgeText = 'تمت الزيارة';
+            } else {
+              badgeBg = '#fee2e2'; badgeColor = '#dc2626'; badgeBorder = '#fca5a5';
+              badgeIcon = 'fa-user-times'; badgeText = 'لم يحضر';
+            }
+            return `<div style="background:var(--primary-faint);border:1.5px solid ${badgeBorder};border-radius:12px;padding:12px;margin-bottom:8px;opacity:.88;">
+              <div class="flex justify-between items-start">
+                <div>
+                  <p class="font-bold" style="color:var(--text-primary)">${r.PatientName}</p>
+                  <p class="text-xs mt-1" style="color:var(--primary)">${r.Phone}</p>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+                  <span style="font-size:.72rem;padding:3px 10px;border-radius:20px;font-weight:700;background:${badgeBg};color:${badgeColor};border:1px solid ${badgeBorder};">
+                    <i class="fas ${badgeIcon}" style="margin-left:3px;font-size:.65rem;"></i>${badgeText}
+                  </span>
+                  <span style="font-size:.7rem;color:var(--text-muted);">${r.VisitType || ''} · ${r.Slot === 'Evening' ? 'مساءً' : 'صباحاً'}</span>
+                </div>
+              </div>
+            </div>`;
+          }
+          // إذا كان الموعد مؤكد فقط، نستخدم الشكل العادي
+          return agendaCardHTML(r);
+        };
+
+        document.getElementById('agendaMorning').innerHTML = morning.length ? morning.map(currentAgendaCard).join('') : emptyMsg('صباحية');
+        document.getElementById('agendaEvening').innerHTML = evening.length ? evening.map(currentAgendaCard).join('') : emptyMsg('مسائية');
+      }
+    }
+
+    function agendaCardHTML(record) {
+      return `<div style="background:var(--primary-faint);border:1.5px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;">
+        <div class="flex justify-between items-start">
+          <div><p class="font-bold" style="color:var(--text-primary)">${record.PatientName}</p><p class="text-xs mt-1" style="color:var(--primary)">${record.Phone}</p></div>
+          <div class="flex gap-1">
+            <a href="tel:${normalizePhone(record.Phone)}" style="width:36px;height:36px;border-radius:9px;background:#2563eb;color:white;display:flex;align-items:center;justify-content:center;font-size:.8rem;flex-shrink:0;"><i class="fas fa-phone"></i></a>
+            <button class="appt-card-btn appt-card-btn--details" onclick="openAppointmentDetailsModal('${record.id}')"><i class="fas fa-eye"></i></button>
+          </div>
+        </div>
+        <div class="mt-2 text-xs" style="color:var(--text-muted)">${record.VisitType} · ${record.Slot==='Morning'?'صباحاً':'مساءً'}</div>
+      </div>`;
+    }
+
+    // ==================== مودال تفاصيل الموعد (معدل) ====================
+    window.openAppointmentDetailsModal = function(id) {
+      const record = allRecords.find(r => r.id === id);
+      if (!record) return;
+      /* نحفظ هوية الموعد المفتوح ليعرف زرّ «فتح الإضبارة» أيّ مريض يفتح —
+         بديل الكليك اليمين على الهاتف حيث لا وجود له. */
+      _apptdCurrentId = id;
+
+      const phone = record.Phone || record.phone || '-';
+      const slotAr = slotTimeOf(record);
+      const dateStr = record.Date ? formatDateAr(record.Date) : '-';
+
+      // Header
+      document.getElementById('modalAgendaTitle').textContent = dateStr;
+
+      // Badges
+      document.getElementById('slotBadge').textContent = slotAr;
+      document.getElementById('visitTypeBadge').textContent = record.VisitType || '-';
+
+      // Info grid
+      document.getElementById('appDetailsName').textContent = record.PatientName || '-';
+      document.getElementById('appDetailsBirthDate').textContent = record.BirthDate ? formatDateAr(record.BirthDate) : '-';
+      document.getElementById('appDetailsAddress').textContent = record.Address || '-';
+      document.getElementById('appDetailsPhone').textContent = phone;
+      const age = record.BirthDate ? calculateAge(record.BirthDate) : '-';
+      document.getElementById('appDetailsAge').textContent = age !== '-' ? age + ' سنة' : '-';
+
+      // WhatsApp button
+      document.getElementById('appDetailsWhatsappBtn').href = phone !== '-' ? `https://wa.me/${normalizePhone(phone)}` : '#';
+
+      // Hidden fields
+      document.getElementById('appDetailsVisitType').textContent = record.VisitType || '-';
+      document.getElementById('appDetailsSlot').textContent = slotAr;
+      document.getElementById('appDetailsDate').textContent = dateStr;
+      document.getElementById('appDetailsPhoneInfo').textContent = phone;
+
+      document.getElementById('appointmentDetailsModal').classList.remove('hidden');
+    };
+
+    window.closeAppointmentDetailsModal = function() { document.getElementById('appointmentDetailsModal').classList.add('hidden'); };
+
+    // ==================== دفتر المرضى ====================
+    var _pbTimer = null;
+    var _pbAllCache = null;   // كاش كامل المرضى للبحث الجزئي (يُبطَل عند تغيّرهم)
+    function _pbSortRecent(arr) { return arr.slice().sort(function(a, b){ return (b.lastVisit || '').localeCompare(a.lastVisit || ''); }); }
+    function _pbFilterAndRender(search) {
+      var q = search.toLowerCase(), qp = normalizePhone(search);
+      var res = (_pbAllCache || []).filter(function(p) {
+        return (p.name || '').toLowerCase().indexOf(q) !== -1 || (qp && normalizePhone(p.phone || '').indexOf(qp) !== -1);
+      });
+      _pbRenderRows(_pbSortRecent(res));
+    }
+    function renderPatientBook() {
+      const grid = document.getElementById('patientsGrid');
+      const search = document.getElementById('patientBookSearch').value.trim();
+      if (!search) { _pbRenderRows(_pbSortRecent(Object.values(allPatients))); return; }   // الافتراضي: الأحدث أولاً
+      if (_pbAllCache) { _pbFilterAndRender(search); return; }   // بحث جزئي فوري من الكاش
+      // أوّل بحث بالجلسة: اجلب كل المرضى مرّة (بحث بأي جزء من الاسم أو الهاتف)
+      grid.innerHTML = '<div style="text-align:center;padding:32px 0;color:var(--text-muted)"><i class="fas fa-circle-notch fa-spin"></i> جارٍ التحميل...</div>';
+      clearTimeout(_pbTimer);
+      _pbTimer = setTimeout(function() {
+        window._fb.getDocs(window._fb.col('patients'))
+          .then(function(snap) {
+            _pbAllCache = snap.docs.map(function(d){ return Object.assign({ id: d.id }, d.data()); });
+            var cur = document.getElementById('patientBookSearch').value.trim();
+            if (cur) _pbFilterAndRender(cur); else renderPatientBook();
+          }).catch(function(e){ console.error(e); grid.innerHTML = '<div style="text-align:center;padding:32px 0;color:#dc2626">تعذّر البحث</div>'; });
+      }, 300);
+    }
+    // ── دفتر المرضى كفولدرات — «الاضبارة» تعني ملفاً، والزيارات عناصره ──
+    // كل لوحة: [bg1, bg2] خلفية باستيل + [accent] للأفاتار، تُشتقّ من اسم المريض.
+    var _PB_FOLDERS = [
+      ['#ede9fe','#ddd6fe','#7c3aed'], ['#e0f2fe','#bae6fd','#0284c7'], ['#ffedd5','#fed7aa','#ea580c'],
+      ['#dcfce7','#bbf7d0','#16a34a'], ['#fce7f3','#fbcfe8','#db2777'], ['#ccfbf1','#99f6e4','#0d9488'],
+      ['#e0e7ff','#c7d2fe','#4f46e5'], ['#fef9c3','#fef08a','#ca8a04']
+    ];
+    function _pbPalette(name) {
+      var h = 0, s = name || '', i;
+      for (i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+      return _PB_FOLDERS[h % _PB_FOLDERS.length];
+    }
+    function _pbLastVisit(p) {
+      var d = p.lastVisit || '';
+      if (!d && p.appointments && p.appointments.length) {
+        d = p.appointments.map(function(a){ return a.date; }).filter(Boolean).sort().pop() || '';
+      }
+      if (!d) return { txt: 'مريض جديد', active: false };
+      try {
+        var days = Math.round((new Date().setHours(0,0,0,0) - parseLocalISODate(d).getTime()) / 86400000);
+        var t = days <= 0 ? 'اليوم' : days === 1 ? 'أمس' : days < 30 ? ('قبل ' + days + ' يوم') : formatDateAr(d);
+        return { txt: 'آخر زيارة ' + t, active: days <= 90 };
+      } catch (e) { return { txt: formatDateAr(d), active: true }; }
+    }
+    function _pbCard(p) {
+      var phone = normalizePhone(p.phone);
+      var lv = _pbLastVisit(p);
+      return '<div class="pb-folder" '
+          + 'title="كليك يمين: فتح الإضبارة" oncontextmenu="event.preventDefault();openPatientDetailsModal(\'' + p.id + '\');return false;">'
+        + '<button class="pb-fmenu" title="عرض الإضبارة" onclick="openPatientDetailsModal(\'' + p.id + '\')"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg></button>'
+        + '<div class="pb-fname">' + escapeHtml(p.name || '—') + '</div>'
+        + '<div class="pb-fcount">' + (p.totalVisits || 0) + ' زيارة</div>'
+        + '<div class="pb-fmeta">' + escapeHtml(lv.txt) + '</div>'
+        + '<div class="pb-fact">'
+          + '<button class="pb-fbtn" title="زيارة جديدة" onclick="addNewVisit(\'' + p.id + '\')"><i class="fas fa-plus"></i></button>'
+          + '<a class="pb-fbtn pb-fbtn-wa" href="https://wa.me/' + phone + '" target="_blank" title="واتساب"><i class="fab fa-whatsapp"></i></a>'
+        + '</div>'
+      + '</div>';
+    }
+    function _pbRenderRows(patients) {
+      const grid = document.getElementById('patientsGrid');
+      if (!patients.length) { grid.innerHTML = '<div style="text-align:center;padding:32px 0;color:var(--text-muted)">لا يوجد مرضى</div>'; return; }
+      grid.innerHTML = patients.map(_pbCard).join('');
+    }
+
+    window.openPatientDetailsModal = function(patientId) {
+      const p = allPatients[patientId];
+      if (!p) return;
+      currentPatientIdForVisit = patientId;
+      document.getElementById('modalPatientName').textContent = p.name;
+      document.getElementById('modalPatientPhone').textContent = p.phone;
+      document.getElementById('modalWhatsappBtn').href = `https://wa.me/${normalizePhone(p.phone)}`;
+      document.getElementById('modalCallBtn').href = `tel:${normalizePhone(p.phone)}`;
+      document.getElementById('modalPatientBirthDate').textContent = p.birthDate ? formatDateAr(p.birthDate) : '-';
+      const age = p.birthDate ? calculateAge(p.birthDate) : '-';
+      document.getElementById('modalPatientAge').textContent = age !== '-' ? age+' سنة' : '-';
+      document.getElementById('modalPatientTotalVisits').textContent = p.totalVisits||0;
+      document.getElementById('modalPatientAddress').textContent = p.address||'-';
+      const visits = p.appointments || [];
+      visits.sort((a,b) => (b.date||'').localeCompare(a.date||''));
+      let html = '';
+      visits.forEach((v, idx) => {
+        const hasNote = v.note && v.note.trim().length > 0;
+        const hasContent = hasNote;
+        const prescription = v.prescription || '';
+        html += `<tr>
+          <td class="py-1">${idx+1}</td>
+          <td>${formatDateAr(v.date)}</td>
+          <td>${v.visitType||'-'}</td>
+          <td>${v.slot==='Morning'?'صباحاً':'مساءً'}</td>
+          <td>${hasContent || prescription ? `<button class="view-note-btn"
+            data-note="${escapeHtml(v.note||'')}"
+            data-prescription="${escapeHtml(prescription)}"
+            data-date="${formatDateAr(v.date)}"
+            data-type="${v.visitType}"
+            data-updated-at="${v.noteUpdatedAt || ''}"
+            title="عرض الملاحظة" style="font-size:.75rem;color:var(--primary);text-decoration:underline;cursor:pointer;background:none;border:none;padding:0;font-family:inherit">
+            <i class="fas fa-eye"></i> عرض</button>` : '<span style="color:var(--text-muted);font-size:.75rem">-</span>'}</td>
+          <td><button class="edit-note-btn" data-patient-id="${patientId}" data-visit-idx="${idx}" title="تعديل الملاحظة" style="font-size:.75rem;color:var(--primary);text-decoration:underline;cursor:pointer;background:none;border:none;padding:0;font-family:inherit"><i class="fas fa-pen"></i></button></td>
+        </tr>`;
+      });
+      if (!visits.length) html = '<tr><td colspan="6" style="text-align:center;padding:16px 0;color:var(--text-muted)">لا توجد زيارات</td></tr>';
+      document.getElementById('modalVisitsTableBody').innerHTML = html;
+      
+      // إضافة event listeners للأزرار الجديدة
+      document.querySelectorAll('.view-note-btn').forEach(btn => {
+        btn.addEventListener('click', function(e) {
+          e.preventDefault();
+          const visitData = {
+            note: this.dataset.note,
+            prescription: this.dataset.prescription,
+            dateFormatted: this.dataset.date,
+            visitType: this.dataset.type,
+            noteUpdatedAt: this.dataset.updatedAt ? parseInt(this.dataset.updatedAt, 10) : 0
+          };
+          showNote(visitData);
+        });
+      });
+      
+      document.querySelectorAll('.edit-note-btn').forEach(btn => {
+        btn.addEventListener('click', function(e) {
+          e.preventDefault();
+          const patientId = this.dataset.patientId;
+          const visitIdx = parseInt(this.dataset.visitIdx);
+          openAddNoteModal(patientId, visitIdx);
+        });
+      });
+      
+      document.getElementById('patientDetailsModal').classList.remove('hidden');
+      var _rail = document.getElementById('mainRail'); if (_rail) _rail.style.display = 'none';   // إخفاء السايدبار أثناء فتح الإضبارة
+    };
+
+    window.closePatientDetailsModal = () => { document.getElementById('patientDetailsModal').classList.add('hidden'); var _rail = document.getElementById('mainRail'); if (_rail) _rail.style.display = ''; };   // إعادة إظهار السايدبار
+    document.getElementById('closePatientDetailsModalBtn')?.addEventListener('click', closePatientDetailsModal);
+
+    window.showNote = function(visitData) {
+      document.getElementById('noteContent').textContent = visitData.note || 'لا توجد ملاحظة';
+      document.getElementById('noteVisitInfo').textContent = `تاريخ: ${visitData.dateFormatted} | نوع: ${visitData.visitType}`;
+
+      // عرض "آخر تعديل"
+      const updatedAtEl = document.getElementById('noteUpdatedAt');
+      const updatedAtVal = document.getElementById('noteUpdatedAtValue');
+      if (visitData.noteUpdatedAt) {
+        updatedAtEl.style.display = 'flex';
+        updatedAtVal.textContent = formatRelativeTime(visitData.noteUpdatedAt);
+      } else {
+        updatedAtEl.style.display = 'none';
+      }
+      
+      // عرض الوصفة الطبية
+      const prescriptionSection = document.getElementById('prescriptionSection');
+      const prescriptionContent = document.getElementById('prescriptionContent');
+      if (visitData.prescription && visitData.prescription.trim()) {
+        prescriptionSection.style.display = 'block';
+        prescriptionContent.textContent = visitData.prescription;
+      } else {
+        prescriptionSection.style.display = 'none';
+      }
+
+      // تهيئة حقل واتساب (دمج الملاحظة والوصفة)
+      let whatsappMsg = '';
+      if (visitData.prescription && visitData.prescription.trim()) whatsappMsg += `*الوصفة الطبية:*\n${visitData.prescription}\n\n`;
+      if (visitData.note && visitData.note.trim()) whatsappMsg += `*الملاحظات:*\n${visitData.note}`;
+      document.getElementById('whatsappMsgInput').value = whatsappMsg.trim();
+
+      // إعداد زر الإرسال
+      const sendBtn = document.getElementById('sendToWhatsappBtn');
+      sendBtn.onclick = () => {
+        const msg = document.getElementById('whatsappMsgInput').value;
+        const phone = normalizePhone(document.getElementById('modalPatientPhone').textContent);
+        const whatsappUrl = `https://wa.me/${phone}?text=${encodeURIComponent(msg)}`;
+        window.open(whatsappUrl, '_blank');
+      };
+
+      const noteModal = document.getElementById('noteModal');
+      noteModal.classList.remove('modal-hidden');
+      noteModal.classList.add('modal-visible');
+    };
+
+    window.closeNoteModal = function() {
+      const noteModal = document.getElementById('noteModal');
+      noteModal.classList.remove('modal-visible');
+      noteModal.classList.add('modal-hidden');
+    };
+
+    // ==================== ملاحظات ====================
+
+    window.openAddNoteModal = function(patientId, visitIndex) {
+      document.getElementById('notePatientId').value = patientId;
+      document.getElementById('noteVisitIndex').value = visitIndex;
+      const p = allPatients[patientId];
+      const visit = p && p.appointments && p.appointments[visitIndex];
+      document.getElementById('noteText').value = (visit && visit.note) ? visit.note : '';
+      document.getElementById('prescriptionText').value = (visit && visit.prescription) ? visit.prescription : '';
+
+      const addNoteModal = document.getElementById('addNoteModal');
+      addNoteModal.classList.remove('modal-hidden');
+      addNoteModal.classList.add('modal-visible');
+    };
+
+    window.closeAddNoteModal = function() {
+      const addNoteModal = document.getElementById('addNoteModal');
+      addNoteModal.classList.remove('modal-visible');
+      addNoteModal.classList.add('modal-hidden');
+      document.body.classList.remove('editor-open');
+    };
+
+    function handleSaveNote(sendToWhatsapp = false) {
+      const patientId = document.getElementById('notePatientId').value;
+      const visitIndex = parseInt(document.getElementById('noteVisitIndex').value);
+      const note = document.getElementById('noteText').value.trim();
+      const prescription = document.getElementById('prescriptionText').value.trim();
+      
+      if (patientId && allPatients[patientId] && allPatients[patientId].appointments && allPatients[patientId].appointments[visitIndex]) {
+        const p = allPatients[patientId];
+        p.appointments[visitIndex].note = note;
+        p.appointments[visitIndex].prescription = prescription;
+        p.appointments[visitIndex].noteUpdatedAt = Date.now();
+        
+        // حفظ في Firestore
+        window._fb.setDoc(window._fb.docRef('patients', patientId), p, { merge: true })
+          .then(function() { showToast('تم حفظ البيانات بنجاح', 'success'); })
+          .catch(function(e) { showToast('فشل الحفظ', 'error'); console.error(e); });
+        
+        if (sendToWhatsapp) {
+          const phone = normalizePhone(p.phone);
+          let fullMsg = '';
+          if (prescription) fullMsg += `*الوصفة الطبية:*\n${prescription}\n\n`;
+          if (note) fullMsg += `*الملاحظات:*\n${note}`;
+
+          const whatsappUrl = `https://wa.me/${phone}?text=${encodeURIComponent(fullMsg.trim())}`;
+          window.open(whatsappUrl, '_blank');
+        }
+        
+        closeAddNoteModal();
+        openPatientDetailsModal(patientId);
+      }
+    }
+
+    document.getElementById('saveOnlyBtn')?.addEventListener('click', () => handleSaveNote(false));
+    document.getElementById('saveAndWhatsappBtn')?.addEventListener('click', () => handleSaveNote(true));
+
+    // ==================== التنقل بين الأقسام ====================
+    var _histNav = false;
+    function setActiveSection(section) {
+      currentSection = section;
+      if (!_histNav) history.pushState({ section }, '', '#' + section);
+      document.querySelectorAll('.sidebar-item').forEach(el => el.classList.remove('active'));
+      document.getElementById(`sidebar${section.charAt(0).toUpperCase()+section.slice(1)}`)?.classList.add('active');
+      document.querySelectorAll('.bottom-nav-item').forEach(el => el.classList.remove('active'));
+      document.getElementById(`mobile${section.charAt(0).toUpperCase()+section.slice(1)}`)?.classList.add('active');
+      document.querySelectorAll('section').forEach(el => el.classList.add('hidden'));
+      if (section === 'home') {
+        document.getElementById('homeSection').classList.remove('hidden');
+        window._dayChartAnimate = true; // شغّل تأثير تصاعد الخط عند فتح الرئيسية
+        renderHomeSection();
+      }
+      else if (section === 'calendar') { document.getElementById('calendarSection').classList.remove('hidden'); if (typeof setScheduleView === 'function') setScheduleView(scheduleView); }
+      else if (section === 'patients') { 
+        document.getElementById('patientBookSection').classList.remove('hidden'); 
+        renderPatientBook(); 
+      }
+      else if (section === 'stats') { 
+        document.getElementById('statsSection').classList.remove('hidden'); 
+        document.querySelectorAll('#statsSection .stat-card').forEach(card => {
+          card.classList.add('fade-in');
+          setTimeout(() => card.classList.remove('fade-in'), 500);
+        });
+        updateStats(true); 
+      }
+    }
+
+    // ==================== تحديث تلقائي كل 5 ثوان ====================
+    function autoRefresh() {
+      // onSnapshot يُحدّث البيانات تلقائياً — نكتفي برسم الواجهة فقط
+      if (currentSection === 'stats') updateStats(false);
+      if (currentSection === 'patients') renderPatientBook();
+      if (currentSection === 'calendar') { renderCalendar(); if (selectedDayStr) renderAgendaForDay(selectedDayStr); if (typeof renderScheduleGrid === 'function') renderScheduleGrid(); }
+      if (currentSection === 'home') renderHomeSection();
+    }
+
+    // ربط الأحداث
+    document.getElementById('sidebarHome')?.addEventListener('click', () => setActiveSection('home'));
+    document.getElementById('mobileHome')?.addEventListener('click', () => setActiveSection('home'));
+    document.getElementById('sidebarCalendar')?.addEventListener('click', () => setActiveSection('calendar'));
+    document.getElementById('sidebarPatients')?.addEventListener('click', () => setActiveSection('patients'));
+    document.getElementById('sidebarStats')?.addEventListener('click', () => setActiveSection('stats'));
+    document.getElementById('mobileCalendar')?.addEventListener('click', () => setActiveSection('calendar'));
+    document.getElementById('mobilePatients')?.addEventListener('click', () => setActiveSection('patients'));
+    document.getElementById('mobileStats')?.addEventListener('click', () => setActiveSection('stats'));
+
+    document.getElementById('prevMonthBtn')?.addEventListener('click', () => { currentDate.setMonth(currentDate.getMonth()-1); renderCalendar(); });
+    document.getElementById('nextMonthBtn')?.addEventListener('click', () => { currentDate.setMonth(currentDate.getMonth()+1); renderCalendar(); });
+    document.getElementById('showDayDetailsBtn')?.addEventListener('click', showDayDetails);
+
+    // ── Manual Appointment Overlay (Doctor) ──
+    var _docManualData = {};
+    var _docOCalDate = new Date(); _docOCalDate.setHours(0,0,0,0);
+
+    // ── ساعات الدوام (مصدر موحّد مع تطبيق الحجز والممرضة: config/booking → slots) ──
+    var DOC_DEFAULT_SLOTS = ["08:00","08:30","09:00","09:30","10:00","10:30","11:00","11:30","13:00","13:30","14:00","14:30","15:00","15:30","16:00","16:30","17:00"];
+    window._docBookingSlots = null;
+    // قراءة واحدة فقط عند فتح النموذج (توفيراً للـ reads) — تُخزَّن مؤقتاً ولا تتكرر
+    function docEnsureSlotsLoaded(cb) {
+      if (Array.isArray(window._docBookingSlots)) { if (cb) cb(); return; }
+      if (!window._fbReady) { window._docBookingSlots = DOC_DEFAULT_SLOTS.slice(); if (cb) cb(); return; }
+      window._fb.getDoc('config', 'booking').then(function(snap) {
+        var data = snap.exists() ? (snap.data() || {}) : {};
+        window._docBookingSlots = (Array.isArray(data.slots) && data.slots.length) ? data.slots.slice() : DOC_DEFAULT_SLOTS.slice();
+      }).catch(function() {
+        window._docBookingSlots = DOC_DEFAULT_SLOTS.slice();
+      }).finally(function() { if (cb) cb(); });
+    }
+    function docSlots() { return Array.isArray(window._docBookingSlots) && window._docBookingSlots.length ? window._docBookingSlots : DOC_DEFAULT_SLOTS; }
+
+    // مُعرّف قفل الساعة (موحّد مع الممرضة وتطبيق الحجز: تاريخ مطبَّع + ساعة بلا نقطتين)
+    function docSlotLockId(dateStr, time) {
+      var s = (dateStr + '').trim().substring(0, 10);
+      var p = s.split('-').map(Number);
+      if (p[0] && p[1] && p[2]) s = p[0] + '-' + String(p[1]).padStart(2, '0') + '-' + String(p[2]).padStart(2, '0');
+      return s + '_' + String(time).replace(':', '');
+    }
+    // الساعات المحجوزة ليوم معيّن — تُحسب من السجلات الموجودة في الذاكرة (allRecords) بلا أي reads إضافية
+    function docTakenHoursForDate(dateStr) {
+      var taken = {};
+      (allRecords || []).forEach(function(r) {
+        if (!r) return;
+        if (r.Status === 'Cancelled' || r.Status === 'NoShow') return;
+        if (normalizeDate(r.Date) !== dateStr) return;
+        var t = slotTimeOf(r); // يحوّل القيم القديمة (Morning/Evening) إلى وقت أيضاً
+        if (t) taken[t] = true;
+      });
+      // دمج أقفال الحجز إن كانت محمَّلة (مصدر تطبيق المرضى) دون قراءات إضافية
+      var bs = window._bookedSlots || {};
+      Object.keys(bs).forEach(function(id) {
+        if (bs[id] && bs[id].date === dateStr && bs[id].time) taken[bs[id].time] = true;
+      });
+      return taken;
+    }
+    // تنسيق الساعة بصيغة 12 ساعة عربية: "09:30" → "9:30 ص"
+    function docFmtHour12(t) {
+      if (!t || String(t).indexOf(':') < 0) return t || '';
+      var p = String(t).split(':'); var h = parseInt(p[0], 10); var m = p[1];
+      var ap = h < 12 ? 'ص' : 'م';
+      var h12 = h % 12; if (h12 === 0) h12 = 12;
+      return h12 + ':' + m + ' ' + ap;
+    }
+
+    function openDocManualFormOverlay() {
+      var preDate = selectedDayStr || todayStr;
+      _docManualData = { patientName:'', phone:'', birthDate:'', address:'', visitType:'', selectedDate: preDate, selectedSlot:'', currentStep:1 };
+      // Reset fields
+      ['docManualPatientName','docManualPhone','docManualBirthDate','docManualAddress'].forEach(function(id) {
+        var el = document.getElementById(id); if (el) el.value = '';
+      });
+      var vt = document.getElementById('docManualVisitType'); if (vt) vt.value = '';
+      document.getElementById('docManualDateInput').value = preDate;
+      var bd = document.getElementById('docManualBirthDate');
+      if (bd) bd.max = todayStr;
+      // Show preselected day badge
+      var badge = document.getElementById('docPreselectedDayBadge');
+      var lbl   = document.getElementById('docPreselectedDayLabel');
+      if (badge && lbl) {
+        var dateObj = parseLocalISODate(preDate);
+        lbl.textContent = (daysAr ? daysAr[dateObj.getDay()] + ' — ' : '') + formatDateAr(preDate);
+        badge.style.display = 'flex';
+      }
+      // Show slot selector since day is pre-selected
+      var closedWarn = document.getElementById('docOClosedDayWarning');
+      var slotWrap   = document.getElementById('docOSlotSelectorWrapper');
+      var isClosed = typeof isDayClosed === 'function' && isDayClosed(preDate);
+      if (closedWarn) closedWarn.classList.toggle('hidden', !isClosed);
+      if (slotWrap)   slotWrap.classList.toggle('hidden', isClosed);
+      docEnsureSlotsLoaded(function() { docORenderHours(preDate); });
+      _docOCalDate = parseLocalISODate(preDate); _docOCalDate.setHours(0,0,0,0);
+      docOUpdateSummary();
+      docOGoToStep(1);
+      docORenderCalendar();
+      document.getElementById('docManualFormOverlay').classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    window.closeDocManualFormOverlay = function() {
+      document.getElementById('docManualFormOverlay').classList.remove('active');
+      document.body.style.overflow = '';
+    };
+
+    window.docHandleOverlayClick = function(e) {
+      if (e.target.id === 'docManualFormOverlay') closeDocManualFormOverlay();
+    };
+
+    function docOGoToStep(step) {
+      _docManualData.currentStep = step;
+      document.querySelectorAll('#docManualFormPanel .doc-form-step').forEach(function(s) { s.classList.remove('active'); });
+      var el = document.getElementById('docOverlayStep' + step); if (el) el.classList.add('active');
+      // Update dots
+      [1,2,3].forEach(function(n) {
+        var dot = document.getElementById('docStep' + n + 'Dot');
+        var wrap = document.getElementById('docStep' + n + 'Wrapper');
+        var conn1 = document.getElementById('docConnector1');
+        var conn2 = document.getElementById('docConnector2');
+        if (!dot) return;
+        dot.style.background = ''; dot.style.borderColor = ''; dot.style.color = '';
+        dot.innerHTML = n;
+        if (n < step) {
+          dot.style.background = 'var(--green)'; dot.style.borderColor = 'var(--green)'; dot.style.color = 'white';
+          dot.innerHTML = '<i class="fas fa-check" style="font-size:.75rem;"></i>';
+          if (wrap) { var sp = wrap.querySelector('span'); if(sp) sp.style.color = 'var(--green)'; }
+        } else if (n === step) {
+          dot.style.background = 'var(--primary)'; dot.style.borderColor = 'var(--primary)'; dot.style.color = 'white';
+          if (wrap) { var sp = wrap.querySelector('span'); if(sp) sp.style.color = 'var(--primary)'; }
+        } else {
+          dot.style.background = 'var(--bg)'; dot.style.borderColor = 'var(--border)'; dot.style.color = 'var(--text-muted)';
+          if (wrap) { var sp = wrap.querySelector('span'); if(sp) sp.style.color = 'var(--text-muted)'; }
+        }
+        if (conn1) conn1.style.background = step > 1 ? 'var(--green)' : 'var(--border)';
+        if (conn2) conn2.style.background = step > 2 ? 'var(--green)' : 'var(--border)';
+      });
+    }
+
+    function docOUpdateSummary() {
+      // اقرأ مباشرة من الحقول لضمان التزامن على desktop
+      var name      = (document.getElementById('docManualPatientName')?.value.trim()) || _docManualData.patientName || '-';
+      var phone     = (document.getElementById('docManualPhone')?.value.trim())       || _docManualData.phone       || '-';
+      var visitType = (document.getElementById('docManualVisitType')?.value)          || _docManualData.visitType   || '-';
+      var birthDate = (document.getElementById('docManualBirthDate')?.value)          || _docManualData.birthDate;
+      var age       = birthDate ? (calculateAge(birthDate) + ' سنة') : '-';
+      var date      = _docManualData.selectedDate ? formatDateAr(_docManualData.selectedDate) : '-';
+      var slot      = _docManualData.selectedSlot ? docFmtHour12(_docManualData.selectedSlot) : '-';
+      var el;
+      el = document.getElementById('docOSummaryPatientName'); if (el) el.textContent = name;
+      el = document.getElementById('docOSummaryAge');         if (el) el.textContent = age;
+      el = document.getElementById('docOConfirmPatientName'); if (el) el.textContent = name;
+      el = document.getElementById('docOConfirmPhone');       if (el) el.textContent = phone;
+      el = document.getElementById('docOConfirmVisitType');   if (el) el.textContent = visitType;
+      el = document.getElementById('docOConfirmDate');        if (el) el.textContent = date;
+      el = document.getElementById('docOConfirmSlot');        if (el) el.textContent = slot;
+    }
+
+    function docORenderCalendar() {
+      var grid = document.getElementById('docOCalGrid'); if (!grid) return;
+      grid.innerHTML = '';
+      var year = _docOCalDate.getFullYear(), month = _docOCalDate.getMonth();
+      var monthEl = document.getElementById('docOCalMonth');
+      if (monthEl) monthEl.textContent = (typeof monthsAr !== 'undefined' ? monthsAr[month] : month) + ' ' + year;
+      var today2 = new Date(); today2.setHours(0,0,0,0);
+      var maxDate = new Date(today2); maxDate.setMonth(maxDate.getMonth() + 3);
+      var firstDay = new Date(year, month, 1).getDay();
+      var daysInMonth = new Date(year, month+1, 0).getDate();
+      var startOffset = (firstDay + 2) % 7;
+      for (var i = startOffset-1; i >= 0; i--) {
+        var emp = document.createElement('div'); emp.className = 'compact-calendar-day other-month'; grid.appendChild(emp);
+      }
+      for (var d = 1; d <= daysInMonth; d++) {
+        (function(day) {
+          var dateObj = new Date(year, month, day); dateObj.setHours(0,0,0,0);
+          var dateStr = toLocalISODate(dateObj);
+          var isClosed = typeof isDayClosed === 'function' && isDayClosed(dateStr);
+          var isFutureTooFar = dateObj > maxDate;
+          var isSelected = _docManualData.selectedDate === dateStr;
+          var isToday = dateObj.getTime() === today2.getTime();
+          var recs = (allRecords || []).filter(function(r) {
+            return (r.Status === 'Accepted' || r.Status === 'Pending' || r.Status === 'InProgress') && normalizeDate(r.Date) === dateStr;
+          });
+          var total = recs.length;
+          var el = document.createElement('div');
+          el.className = 'compact-calendar-day';
+          if (isToday)   el.classList.add('today');
+          if (isSelected) el.classList.add('selected');
+          if (isClosed)  el.classList.add('closed-day');
+          if (isFutureTooFar) { el.classList.add('past-day'); el.style.cursor = 'default'; }
+          el.textContent = day;
+          if (!isFutureTooFar && total > 0) {
+            var dot = document.createElement('div');
+            dot.className = 'compact-appointment-dot ' + (total <= 2 ? 'compact-dot-low' : total <= 4 ? 'compact-dot-medium' : 'compact-dot-high');
+            el.appendChild(dot);
+          }
+          if (!isClosed && !isFutureTooFar) {
+            el.addEventListener('click', function() { docOSelectDay(dateStr); });
+          }
+          grid.appendChild(el);
+        })(d);
+      }
+    }
+
+    function docOSelectDay(dateStr) {
+      _docManualData.selectedDate = dateStr;
+      document.getElementById('docManualDateInput').value = dateStr;
+      var isClosed = typeof isDayClosed === 'function' && isDayClosed(dateStr);
+      var closedWarn = document.getElementById('docOClosedDayWarning');
+      var slotWrap   = document.getElementById('docOSlotSelectorWrapper');
+      if (closedWarn) closedWarn.classList.toggle('hidden', !isClosed);
+      if (slotWrap)   slotWrap.classList.toggle('hidden', isClosed);
+      // الساعات المتاحة تختلف من يوم لآخر — أعد البناء وامسح الاختيار السابق
+      _docManualData.selectedSlot = '';
+      if (!isClosed) docEnsureSlotsLoaded(function() { docORenderHours(dateStr); });
+      // Update badge label
+      var lbl = document.getElementById('docPreselectedDayLabel');
+      if (lbl) {
+        var dateObj = parseLocalISODate(dateStr);
+        lbl.textContent = (daysAr ? daysAr[dateObj.getDay()] + ' — ' : '') + formatDateAr(dateStr);
+      }
+      docOUpdateSummary();
+      docORenderCalendar();
+    }
+
+    // ── اختيار الوقت: قائمة <select> موحّدة تماماً مع ملف الممرضة ──
+    // بناء خيارات <option> لقائمة السلوتات (يُدرج القيمة المختارة حتى لو لم تكن ضمن القائمة)
+    function docBuildTimeOptions(selected) {
+      var opts = docSlots().slice();
+      if (selected && opts.indexOf(selected) === -1) opts = [selected].concat(opts);
+      var sel = selected || docSlots()[0];
+      return opts.map(function(t) {
+        return '<option value="' + t + '"' + (t === sel ? ' selected' : '') + '>' + t + '</option>';
+      }).join('');
+    }
+    // تعبئة عنصر <select> بقائمة السلوتات
+    function docFillTimeSelect(selected) {
+      var el = document.getElementById('docOSlotSelect');
+      if (el) el.innerHTML = docBuildTimeOptions(selected || docSlots()[0]);
+    }
+    // تعطيل الأوقات المحجوزة في القائمة، وإرجاع أول وقت متاح
+    function docMarkTakenOptions(dateStr) {
+      var el = document.getElementById('docOSlotSelect'); if (!el) return '';
+      var taken = docTakenHoursForDate(dateStr);
+      var firstFree = '';
+      Array.prototype.forEach.call(el.options, function(o) {
+        if (!o.value) return;
+        if (taken[o.value]) { o.disabled = true; o.textContent = o.value + ' — محجوز'; }
+        else { o.disabled = false; o.textContent = o.value; if (!firstFree) firstFree = o.value; }
+      });
+      if ((!el.value || taken[el.value]) && firstFree) el.value = firstFree;
+      return firstFree;
+    }
+    // تعبئة قائمة الأوقات لليوم المحدد وضبط الاختيار على أول وقت متاح
+    function docORenderHours(dateStr) {
+      docFillTimeSelect(_docManualData.selectedSlot || docSlots()[0]);
+      docMarkTakenOptions(dateStr);
+      var el = document.getElementById('docOSlotSelect');
+      if (el) _docManualData.selectedSlot = el.value;
+      docOUpdateSummary();
+    }
+
+    window.docOSelectSlot = function(slot) {
+      _docManualData.selectedSlot = slot;
+      var sel = document.getElementById('docOSlotSelect');
+      if (sel && sel.value !== slot) sel.value = slot;
+      docOUpdateSummary(); // حدّث التأكيد فوراً
+    };
+
+    window.docOPrevMonth = function() { _docOCalDate.setMonth(_docOCalDate.getMonth()-1); docORenderCalendar(); };
+    window.docONextMonth = function() { _docOCalDate.setMonth(_docOCalDate.getMonth()+1); docORenderCalendar(); };
+
+    // ── Manual Appointment Overlay (Doctor) — Event Bindings ──
+    document.addEventListener('DOMContentLoaded', function() {
+
+    // Bind + button
+    document.getElementById('addManualApptBtn')?.addEventListener('click', function() {
+      openDocManualFormOverlay();
+    });
+
+    // Live input → update summary instantly (مهم على desktop حيث الخطوات كلها ظاهرة)
+    ['docManualPatientName','docManualPhone','docManualBirthDate','docManualAddress'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('input', function(e) {
+        var map = { docManualPatientName:'patientName', docManualPhone:'phone', docManualBirthDate:'birthDate', docManualAddress:'address' };
+        _docManualData[map[id]] = e.target.value;
+        docOUpdateSummary();
+      });
+    });
+    var vtEl = document.getElementById('docManualVisitType');
+    if (vtEl) vtEl.addEventListener('change', function(e) { _docManualData.visitType = e.target.value; docOUpdateSummary(); });
+
+    document.getElementById('docNextToStep2')?.addEventListener('click', function() {
+      _docManualData.patientName = document.getElementById('docManualPatientName').value.trim();
+      _docManualData.phone       = document.getElementById('docManualPhone').value.trim();
+      _docManualData.birthDate   = document.getElementById('docManualBirthDate').value;
+      _docManualData.address     = document.getElementById('docManualAddress').value.trim();
+      _docManualData.visitType   = document.getElementById('docManualVisitType').value;
+      if (!_docManualData.patientName || !_docManualData.phone || !_docManualData.birthDate || !_docManualData.visitType) {
+        showToast('املأ جميع الحقول المطلوبة', 'error'); return;
+      }
+      docOUpdateSummary(); docORenderCalendar(); docOGoToStep(2);
+    });
+    document.getElementById('docBackToStep1')?.addEventListener('click', function() { docOGoToStep(1); });
+    document.getElementById('docNextToStep3')?.addEventListener('click', function() {
+      _docManualData.selectedDate = document.getElementById('docManualDateInput').value;
+      if (!_docManualData.selectedDate) { showToast('اختر تاريخ الموعد', 'error'); return; }
+      if (isDayClosed(_docManualData.selectedDate)) { showToast('هذا اليوم مغلق للحجز', 'error'); return; }
+      if (!_docManualData.selectedSlot) { showToast('اختر ساعة الموعد', 'error'); return; }
+      docOUpdateSummary(); docOGoToStep(3);
+    });
+    document.getElementById('docBackToStep2')?.addEventListener('click', function() { docOGoToStep(2); });
+
+    document.getElementById('docSubmitManualAppointment')?.addEventListener('click', function() {
+      // اقرأ القيم مباشرة من الحقول (أضمن من الـ state)
+      var patientName = document.getElementById('docManualPatientName').value.trim();
+      var phone       = document.getElementById('docManualPhone').value.trim();
+      var birthDate   = document.getElementById('docManualBirthDate').value;
+      var address     = document.getElementById('docManualAddress').value.trim();
+      var visitType   = document.getElementById('docManualVisitType').value;
+      var selectedDate = document.getElementById('docManualDateInput').value;
+      var selectedSlot = _docManualData.selectedSlot;
+
+      if (!patientName) { showToast('أدخل اسم المريض', 'error'); return; }
+      if (!phone)       { showToast('أدخل رقم الهاتف', 'error'); return; }
+      if (!visitType)   { showToast('اختر نوع الزيارة', 'error'); return; }
+      if (!selectedDate){ showToast('اختر تاريخ الموعد', 'error'); return; }
+      if (isDayClosed(selectedDate)) { showToast('هذا اليوم مغلق للحجز', 'error'); return; }
+      if (!selectedSlot){ showToast('اختر ساعة الموعد', 'error'); return; }
+      // تحقّق أخير من توفّر الساعة (يُحسب من الذاكرة بلا reads إضافية) لتفادي الحجز المزدوج
+      if (docTakenHoursForDate(selectedDate)[selectedSlot]) {
+        showToast('هذه الساعة لم تعد متاحة، اختر ساعة أخرى', 'error');
+        docORenderHours(selectedDate); docOGoToStep(2);
+        return;
+      }
+
+      var btn = document.getElementById('docSubmitManualAppointment');
+      if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الحفظ...'; }
+
+      var appointment = {
+        PatientName: patientName,
+        Phone:       phone,
+        BirthDate:   birthDate,
+        Address:     address,
+        VisitType:   visitType,
+        Date:        selectedDate,
+        Slot:        selectedSlot,
+        Status:      'Accepted',
+        createdAt:   new Date().toISOString(),
+        source:      'manual'
+      };
+
+      window._fb.addDoc(window._fb.col('appointments'), appointment)
+        .then(function(apptRef) {
+          // ── قفل الساعة (مصدر موحّد مع تطبيق الحجز) لمنع الحجز المزدوج — كتابة واحدة ──
+          try {
+            var lockId = docSlotLockId(selectedDate, selectedSlot);
+            window._fb.setDoc(window._fb.docRef('bookedSlots', lockId),
+              { date: selectedDate, time: selectedSlot, apptId: apptRef.id, status: 'booked', source: 'manual', createdAt: window._fb.serverTimestamp() })
+              .catch(function(){});
+          } catch (e) {}
+          // ── إرسال إشعار للممرضة ──
+          var alertPayload = {
+            type:      'newManualAppt',
+            direction: 'doctorToNurse',
+            message:   'موعد جديد: ' + patientName,
+            read:      false,
+            createdAt: window._fb.serverTimestamp(),
+            expireAt:  new Date(Date.now() + 30*24*60*60*1000) // حذف تلقائي بعد ٣٠ يوماً (TTL)
+          };
+          window._fb.addDoc(window._fb.col('alerts'), alertPayload)
+            .then(function(alertRef) {
+              var bc = { type:'newManualAppt', direction:'doctorToNurse',
+                         message:'موعد جديد: ' + patientName,
+                         ts: Date.now(), docId: alertRef.id };
+              try { new BroadcastChannel('nurseAlerts').postMessage(bc); } catch(e) {}
+            }).catch(function(){});
+          closeDocManualFormOverlay();
+          showToast('تم تسجيل الموعد بنجاح ✓', 'success');
+          setActiveSection('calendar');
+          if (typeof selectDay === 'function') selectDay(selectedDate);
+        })
+        .catch(function(e) {
+          showToast('فشل الحفظ: ' + (e.code || e.message), 'error');
+          console.error(e);
+        })
+        .finally(function() {
+          if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-check"></i> تسجيل الموعد'; }
+        });
+    });
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') closeDocManualFormOverlay();
+    });
+
+    }); // end DOMContentLoaded
+    document.getElementById('patientBookSearch')?.addEventListener('input', renderPatientBook);
+
+    // ==================== البحث العالمي ====================
+    (function() {
+      const inp = document.getElementById('globalSearchInput');
+      const res = document.getElementById('globalSearchResults');
+      if (!inp || !res) return;
+
+      function escH(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+      function highlight(text, q) {
+        if (!q) return escH(text);
+        const idx = (text||'').toLowerCase().indexOf(q.toLowerCase());
+        if (idx < 0) return escH(text);
+        return escH(text.slice(0, idx)) + '<mark style="background:#d1fae5;color:#065f46;border-radius:3px;padding:0 2px;">' + escH(text.slice(idx, idx+q.length)) + '</mark>' + escH(text.slice(idx+q.length));
+      }
+
+      function doSearch(q) {
+        if (!q || q.trim().length < 1) { res.style.display = 'none'; return; }
+        q = q.trim();
+        const allData = window._allRecords || [];
+        const results = [];
+
+        // البحث في المواعيد المستقبلية فقط (اليوم وما بعده، وغير الملغاة)
+        allData.filter(r => {
+          const name = (r.PatientName||r.patientName||'').toLowerCase();
+          const type = (r.VisitType||r.visitType||'').toLowerCase();
+          const date = normalizeDate(r.Date||r.date||'');
+          const status = r.Status||r.status||'';
+          if (!date || date < todayStr) return false;                 // مستقبلية فقط
+          if (['Cancelled','Rejected'].includes(status)) return false; // تجاهل الملغاة/المرفوضة
+          return name.includes(q.toLowerCase()) || type.includes(q.toLowerCase()) || date.includes(q);
+        }).sort((a,b)=> normalizeDate(a.Date||a.date) .localeCompare(normalizeDate(b.Date||b.date)))
+          .slice(0,6).forEach(r => results.push({
+          id: r.id,
+          name: r.PatientName||r.patientName||'—',
+          date: r.Date||r.date||'',
+          type: r.VisitType||r.visitType||'',
+          status: r.Status||r.status||'',
+          resultType: 'appointment'
+        }));
+
+        if (results.length === 0) {
+          res.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:.83rem;">لا توجد نتائج</div>';
+          res.style.display = 'block';
+          return;
+        }
+
+        res.innerHTML = results.map(r => {
+          if (r.type === 'patient') {
+            return `<div class="gsearch-item" onclick="setActiveSection('patients');document.getElementById('patientBookSearch').value='${escH(r.name)}';renderPatientBook();document.getElementById('globalSearchResults').style.display='none';document.getElementById('globalSearchInput').value='';"
+              style="display:flex;align-items:center;gap:12px;padding:11px 16px;cursor:pointer;transition:background .15s;border-bottom:1px solid var(--border);"
+              onmouseover="this.style.background='var(--primary-faint)'" onmouseout="this.style.background=''">
+              <div style="width:34px;height:34px;border-radius:50%;background:var(--primary-faint);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              </div>
+              <div>
+                <div style="font-size:.84rem;font-weight:700;color:var(--text-primary);">${highlight(r.name, q)}</div>
+                <div style="font-size:.73rem;color:var(--text-muted);margin-top:2px;">مريض ${r.phone ? '· ' + escH(r.phone) : ''}</div>
+              </div>
+            </div>`;
+          } else {
+            const statusColor = r.status==='Visited'?'#10b981':r.status==='Accepted'?'#3b82f6':r.status==='Cancelled'?'#ef4444':'#6b7280';
+            return `<div class="gsearch-item" onclick="openAppointmentDetailsModal('${r.id}');document.getElementById('globalSearchResults').style.display='none';document.getElementById('globalSearchInput').value='';"
+              style="display:flex;align-items:center;gap:12px;padding:11px 16px;cursor:pointer;transition:background .15s;border-bottom:1px solid var(--border);"
+              onmouseover="this.style.background='var(--primary-faint)'" onmouseout="this.style.background=''">
+              <div style="width:34px;height:34px;border-radius:50%;background:#ede9fe;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="3"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              </div>
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:.84rem;font-weight:700;color:var(--text-primary);">${highlight(r.name, q)}</div>
+                <div style="font-size:.73rem;color:var(--text-muted);margin-top:2px;">${escH(r.date)} ${r.type ? '· '+escH(r.type) : ''}</div>
+              </div>
+              <span style="font-size:.7rem;font-weight:700;color:${statusColor};background:${statusColor}18;padding:2px 8px;border-radius:20px;flex-shrink:0;">${r.status==='Visited'?'تمت الزيارة':r.status==='Accepted'?'مقبول':r.status==='Cancelled'?'ملغي':escH(r.status)}</span>
+            </div>`;
+          }
+        }).join('');
+
+        res.style.display = 'block';
+      }
+
+      inp.addEventListener('input', function() { doSearch(this.value); });
+      inp.addEventListener('focus', function() { if (this.value.trim()) doSearch(this.value); });
+      document.addEventListener('click', function(e) {
+        if (!inp.contains(e.target) && !res.contains(e.target)) res.style.display = 'none';
+      });
+      inp.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') { res.style.display = 'none'; inp.blur(); }
+      });
+
+      // تخزين السجلات عالمياً
+      window.addEventListener('recordsUpdated', function() {
+        if (window._allRecords) return;
+      });
+    })();
+
+    // زر البحث في هيدر الموبايل: ينتقل للرئيسية ويركّز خانة البحث
+    window.mobileHeaderSearch = function() {
+      if (typeof setActiveSection === 'function') setActiveSection('home');
+      setTimeout(function() {
+        var i = document.getElementById('globalSearchInput');
+        if (i) { i.scrollIntoView({ behavior: 'smooth', block: 'center' }); i.focus(); }
+      }, 150);
+    };
+
+    document.getElementById('dayDetailsModal')?.addEventListener('click', function(e) {
+      if (e.target === this) closeDayDetailsModal();
+    });
+
+    document.getElementById('noteModal')?.addEventListener('click', function(e) {
+      if (e.target === this) closeNoteModal();
+    });
+
+    document.getElementById('addNoteModal')?.addEventListener('click', function(e) {
+      if (e.target === this) closeAddNoteModal();
+    });
+
+    // URL / History routing
+    window.addEventListener('popstate', function(e) {
+      var s = (e.state && e.state.section) || location.hash.slice(1);
+      var valid = ['home','calendar','patients','stats'];
+      if (valid.includes(s)) { _histNav = true; setActiveSection(s); _histNav = false; }
+    });
+
+    // تهيئة
+    document.addEventListener('DOMContentLoaded', () => {
+      // loadData() تُستدعى من onAuth بعد التحقق من تسجيل الدخول
+      var _h = location.hash.slice(1);
+      var _validDoc = ['home','calendar','patients','stats'];
+      var _initDoc = _validDoc.includes(_h) ? _h : 'home';
+      _histNav = true; setActiveSection(_initDoc); _histNav = false;
+      history.replaceState({ section: _initDoc }, '', '#' + _initDoc);
+      const _dateStr = today.toLocaleDateString('ar-EG', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+      const sidebarDate = document.getElementById('sidebarDoctorDate');
+      if (sidebarDate) sidebarDate.textContent = _dateStr;
+      const mtbDate = document.getElementById('mtbDate');
+      if (mtbDate) mtbDate.textContent = _dateStr;
+    });
+
+    // ==================== الصفحة الرئيسية ====================
+    /* تلوين بطاقات ملخّص اليوم: النسبة + شريط الحصّة + إنذار الغياب.
+       الغياب يحمرّ فقط إن وُجد — صفر غياب خبر جيّد لا إنذار. */
+    function _kpiPaint(total, left, done, miss) {
+      function pct(n) { return total ? Math.round(n / total * 100) : 0; }
+      function put(id, n, showPct) {
+        var el = document.getElementById(id + 'Pct');
+        if (el) el.innerHTML = (total && showPct) ? (pct(n) + '٪ من اليوم') : '&nbsp;';
+        var bar = document.getElementById(id + 'Bar');
+        if (bar) bar.style.width = pct(n) + '%';
+      }
+      put('homeStatRemaining', left, true);
+      put('homeStatVisited', done, true);
+      put('homeStatNoShow', miss, miss > 0);
+      var card = document.getElementById('homeStatNoShowCard');
+      if (card) card.classList.toggle('on', miss > 0);
+      var tag = document.getElementById('homeStatNoShowTag');
+      if (tag) tag.textContent = miss > 0 ? 'غياب' : 'لا غياب';
+    }
+
+    function updateHomeSummaryStats() { renderHomeSection(); }
+    /* ارتفاع عمود الروزنامة — يُحسب من موقعه الفعلي لا بـcalc ثابتة.
+       العمود sticky بـtop:16px، لكن عند أعلى الصفحة يبدأ تحت شريط التحية
+       (~١٠٠px)، فـ`height:calc(100vh - 16px)` كانت تتجاوز الشاشة بنفس المقدار
+       وتُقصّ لوحة اليوم. هنا نقيس المسافة الفعلية فتنتهي اللوحة بمحاذاة
+       الشريط الجانبي تماماً. */
+    function syncHomeColHeight() {
+      var col = document.getElementById('homeRightCol');
+      if (!col || window.innerWidth < 768) { if (col) col.style.height = ''; return; }
+      if (col.offsetParent === null) return;             // مخفي — لا قياس
+      var top = col.getBoundingClientRect().top + (window.scrollY || 0);
+      /* حتى أسفل الشاشة تماماً: الشريط الجانبي fixed من ٠ إلى bottom:0، فالمحاذاة
+         معه تعني bottom = ارتفاع الشاشة. وحشوتا <body>/<main> السفليتان مُصفّرتان
+         على اللابتوب، وإلا زادتا ارتفاع المستند فظهر شريط تمرير للصفحة. */
+      var h = window.innerHeight - top;
+      col.style.height = (h > 320 ? h : 320) + 'px';     // حدّ أدنى معقول
+    }
+    window.addEventListener('resize', syncHomeColHeight);
+
+    function renderHomeSection() {
+      var now = new Date();
+      var h = now.getHours();
+      var greet, svgIcon;
+      var sunSVG = '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:6px;flex-shrink:0;"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="4.22" y1="4.22" x2="6.34" y2="6.34"/><line x1="17.66" y1="17.66" x2="19.78" y2="19.78"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/><line x1="4.22" y1="19.78" x2="6.34" y2="17.66"/><line x1="17.66" y1="6.34" x2="19.78" y2="4.22"/></svg>';
+      var moonSVG = '<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="#6366f1" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:6px;flex-shrink:0;"><path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z"/></svg>';
+      var partCloudSVG = '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:6px;flex-shrink:0;"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="4.22" y1="4.22" x2="6.34" y2="6.34"/><line x1="2" y1="12" x2="5" y2="12"/><path d="M17 14a3 3 0 1 1 0 6H8a4 4 0 1 1 .87-7.9A4.5 4.5 0 0 1 17 14z" stroke="#94a3b8" fill="rgba(148,163,184,0.18)"/></svg>';
+      if (h >= 5 && h < 12)       { greet = 'صباح الخير';  svgIcon = sunSVG; }
+      else if (h >= 12 && h < 17) { greet = 'مساء الخير';  svgIcon = partCloudSVG; }
+      else if (h >= 17 && h < 21) { greet = 'مساء النور';  svgIcon = moonSVG; }
+      else                         { greet = 'مساء الخير'; svgIcon = moonSVG; }
+
+      var nameEl = document.getElementById('profileDisplayName');
+      var name = (nameEl && nameEl.textContent && nameEl.textContent.trim()) ? nameEl.textContent.trim() : '';
+      var displayName = name.replace(/^لوحة\s*الطبيب\s*$/, '').replace(/^لوحة\s*/, '').replace(/^دكتور\s*/, '').replace(/^د\.?\s*/i, '').trim();
+      var firstName = displayName ? displayName.split(/\s+/)[0] : '';
+      var titlePrefix = firstName ? ('د. ' + firstName) : 'دكتور';
+
+      var g = document.getElementById('homeGreeting');
+      if (g) g.innerHTML = '<span style="display:inline-flex;align-items:center;gap:4px;">' + svgIcon + greet + '، ' + titlePrefix + '</span>';
+      var d = document.getElementById('homeDateLabel');
+      if (d) d.textContent = 'إليك ملخص عيادتك ليوم ' + now.toLocaleDateString('ar-EG', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+      try {
+        var records = (typeof allRecords !== 'undefined' && allRecords) ? allRecords : [];
+        var todays = records.filter(function(r){ return r.Date === todayStr; });
+        // تعديل: حساب كافة المواعيد المقبولة بغض النظر عن حالة الحضور
+        var accepted = todays.filter(function(r){ return r.Status === 'Accepted'; });
+        var visited  = todays.filter(function(r){ return r.Status === 'Visited'; });
+        var noShow   = todays.filter(function(r){ return r.Status === 'NoShow'; });
+        
+        // إجمالي المواعيد المقبولة لليوم
+        var totalToday = accepted.length + visited.length + noShow.length;
+
+        setText('homeStatTotal', totalToday);
+        setText('homeStatRemaining', accepted.length);
+        setText('homeStatVisited', visited.length);
+        setText('homeStatNoShow', noShow.length);
+        _kpiPaint(totalToday, accepted.length, visited.length, noShow.length);
+        // بطاقات الموبايل (نفس شكل الممرضة)
+        setText('msTotal', totalToday);
+        setText('msRem', accepted.length);
+        setText('msVis', visited.length);
+        setText('msAbs', noShow.length);
+        // بطاقات قسم المواعيد المؤكدة (أسفل الروزنامة) — تُحدَّث الآن من renderAgendaForDay حسب اليوم المختار في الروزنامة
+
+        // ── شريط إنجاز اليوم ──
+        var progressPct = totalToday > 0 ? Math.round((visited.length / totalToday) * 100) : 0;
+        var pb = document.getElementById('homeProgressBar');
+        var pl = document.getElementById('homeProgressLabel');
+        var ps = document.getElementById('homeProgressSub');
+        var pst = document.getElementById('homeProgressStatus');
+        if (pb) setTimeout(function(){ pb.style.width = progressPct + '%'; }, 80);
+        if (pl) pl.textContent = progressPct + '%';
+        if (ps) ps.textContent = visited.length + ' من ' + totalToday + ' موعد مكتمل';
+        if (pst) {
+          if (totalToday === 0) { pst.textContent = 'لا مواعيد اليوم'; pst.style.background='var(--border)'; pst.style.color='var(--text-muted)'; }
+          else if (progressPct === 100) { pst.textContent = '🎉 أنجزت يومك!'; pst.style.background='var(--green-light)'; pst.style.color='var(--green)'; }
+          else if (progressPct >= 50) { pst.textContent = 'في المسار الصحيح'; pst.style.background='var(--primary-light)'; pst.style.color='var(--primary)'; }
+          else { pst.textContent = 'بداية اليوم'; pst.style.background='var(--primary-faint)'; pst.style.color='var(--primary)'; }
+        }
+
+        // ── مقارنة الأسبوع الحالي بالماضي ──
+        var thisWeekStart = new Date(today);
+        var dowT = thisWeekStart.getDay();
+        var diffFri = (dowT - 5 + 7) % 7;
+        thisWeekStart.setDate(thisWeekStart.getDate() - diffFri);
+        var lastWeekStart = new Date(thisWeekStart); lastWeekStart.setDate(thisWeekStart.getDate() - 7);
+        var thisWeekTotal = 0, lastWeekTotal = 0;
+        for (var wi = 0; wi < 7; wi++) {
+          var wd1 = new Date(thisWeekStart); wd1.setDate(thisWeekStart.getDate() + wi);
+          var wd2 = new Date(lastWeekStart);  wd2.setDate(lastWeekStart.getDate() + wi);
+          var ds1 = toLocalISODate(wd1), ds2 = toLocalISODate(wd2);
+          thisWeekTotal += records.filter(function(r){ return r.Date===ds1 && (r.Status==='Accepted'||r.Status==='Visited'||r.Status==='NoShow'); }).length;
+          lastWeekTotal += records.filter(function(r){ return r.Date===ds2 && (r.Status==='Accepted'||r.Status==='Visited'||r.Status==='NoShow'); }).length;
+        }
+        setText('homeWeekCurrent', thisWeekTotal);
+        setText('homeWeekLast', lastWeekTotal);
+        var diffIcon = document.getElementById('homeWeekDiffIcon');
+        var diffLabel = document.getElementById('homeWeekDiffLabel');
+        var barCur = document.getElementById('homeWeekBarCurrent');
+        var barLst = document.getElementById('homeWeekBarLast');
+        var wDiff = thisWeekTotal - lastWeekTotal;
+        if (diffIcon && diffLabel) {
+          if (wDiff > 0) {
+            diffIcon.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>';
+            diffLabel.textContent = '+' + wDiff;
+            diffLabel.style.color = 'var(--green)';
+          } else if (wDiff < 0) {
+            diffIcon.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+            diffLabel.textContent = wDiff;
+            diffLabel.style.color = 'var(--red)';
+          } else {
+            diffIcon.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="9" x2="19" y2="9"/><line x1="5" y1="15" x2="19" y2="15"/></svg>';
+            diffLabel.textContent = 'لا فرق'; diffLabel.style.color = 'var(--text-muted)';
+          }
+        }
+        var wMax = Math.max(thisWeekTotal + lastWeekTotal, 1);
+        if (barCur) setTimeout(function(){ barCur.style.width = Math.round((thisWeekTotal/wMax)*100) + '%'; }, 100);
+        if (barLst) setTimeout(function(){ barLst.style.width = Math.round((lastWeekTotal/wMax)*100) + '%'; }, 100);
+
+
+        var upcoming = accepted.slice().sort(function(a,b){
+          var sa = (a.Slot === 'Morning' ? 0 : 1);
+          var sb = (b.Slot === 'Morning' ? 0 : 1);
+          return sa - sb;
+        }).slice(0, 5);
+        var ul = document.getElementById('homeUpcomingList');
+        setText('homeUpcomingCount', upcoming.length);
+        if (ul) {
+          if (!upcoming.length) {
+            ul.innerHTML = '<div style="text-align:center;padding:18px;color:var(--text-muted);font-size:.82rem;">لا توجد مواعيد قادمة اليوم</div>';
+          } else {
+            ul.innerHTML = upcoming.map(function(r){
+              var slotAr = r.Slot === 'Evening' ? 'مساءً' : 'صباحاً';
+              return '<div onclick="openAppointmentDetailsModal(\''+r.id+'\')" style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--primary-faint);border:1.5px solid var(--border);border-radius:10px;cursor:pointer;transition:all .15s;">'
+                + '<div style="width:36px;height:36px;border-radius:10px;background:var(--primary-light);color:var(--primary);display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0;"><i class="fas fa-user"></i></div>'
+                + '<div style="flex:1;min-width:0;">'
+                + '<div style="font-weight:700;font-size:.85rem;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+(r.PatientName||'-')+'</div>'
+                + '<div style="font-size:.7rem;color:var(--text-muted);margin-top:2px;">'+(r.VisitType||'-')+' · '+slotAr+'</div>'
+                + '</div>'
+                + '<i class="fas fa-chevron-left" style="color:var(--text-muted);font-size:.75rem;"></i>'
+                + '</div>';
+            }).join('');
+          }
+        }
+
+        // تنبيهات الرئيسية مُزالة بناءً على الطلب
+        var aw = document.getElementById('homeAlertsWrap');
+        if (aw) { aw.style.display = 'none'; aw.innerHTML = ''; }
+
+        // آخر المرضى المُزارين
+        var rp = document.getElementById('homeRecentPatients');
+        if (rp) {
+          var recent = [];
+          if (typeof allPatients !== 'undefined' && allPatients) {
+            Object.values(allPatients).forEach(function(p){
+              var lastTs = 0, lastVisit = null;
+              (p.appointments||[]).forEach(function(v){
+                var ts = v.noteUpdatedAt || (v.date ? new Date(v.date).getTime() : 0);
+                if (ts > lastTs) { lastTs = ts; lastVisit = v; }
+              });
+              if (lastTs > 0) recent.push({patient:p, ts:lastTs, visit:lastVisit});
+            });
+            recent.sort(function(a,b){ return b.ts - a.ts; });
+            recent = recent.slice(0, 4);
+          }
+          if (!recent.length) {
+            rp.innerHTML = '<div style="text-align:center;padding:18px;color:var(--text-muted);font-size:.82rem;">لا توجد زيارات حديثة</div>';
+          } else {
+            rp.innerHTML = recent.map(function(it){
+              var p = it.patient;
+              var rel = formatRelativeTime ? formatRelativeTime(it.ts) : '';
+              return '<div onclick="openPatientDetailsModal(\''+p.id+'\')" style="display:flex;align-items:center;gap:10px;padding:10px;background:var(--primary-faint);border:1.5px solid var(--border);border-radius:10px;cursor:pointer;">'
+                + '<div style="width:36px;height:36px;border-radius:50%;background:var(--primary-light);color:var(--primary);display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0;">'+(p.name?p.name.charAt(0):'?')+'</div>'
+                + '<div style="flex:1;min-width:0;">'
+                + '<div style="font-weight:700;font-size:.85rem;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+(p.name||'-')+'</div>'
+                + '<div style="font-size:.7rem;color:var(--text-muted);margin-top:2px;">آخر زيارة: '+rel+'</div>'
+                + '</div>'
+                + '<i class="fas fa-chevron-left" style="color:var(--text-muted);font-size:.75rem;"></i>'
+                + '</div>';
+            }).join('');
+          }
+        }
+
+        // مؤشر الأسبوع — نبدأ من الجمعة (يوم 5)
+        var wb = document.getElementById('homeWeekBars');
+        if (wb) {
+          var weekStart = new Date(today);
+          var dow = weekStart.getDay(); // الأحد=0 .. السبت=6 ، الجمعة=5
+          var diffToFri = (dow - 5 + 7) % 7;
+          weekStart.setDate(weekStart.getDate() - diffToFri);
+          var dayNames = ['الجمعة','السبت','الأحد','الإثنين','الثلاثاء','الأربعاء','الخميس'];
+          var counts = [];
+          var max = 1;
+          for (var i=0;i<7;i++){
+            var dd = new Date(weekStart); dd.setDate(weekStart.getDate()+i);
+            var ds = toLocalISODate(dd);
+            var c = records.filter(function(r){ return r.Date === ds && (r.Status==='Accepted'||r.Status==='Visited'); }).length;
+            counts.push({ds:ds, count:c, isToday: ds===todayStr});
+            if (c > max) max = c;
+          }
+          wb.innerHTML = counts.map(function(c,i){
+            var pct = Math.max(6, Math.round((c.count/max)*100));
+            var bg = c.isToday ? 'var(--primary)' : (c.count===0 ? 'var(--border)' : 'var(--primary-3)');
+            return '<div style="display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:6px;">'
+              + '<div style="font-size:.7rem;font-weight:800;color:'+(c.isToday?'var(--primary)':'var(--text-primary)')+';">'+c.count+'</div>'
+              + '<div title="'+c.count+' موعد" style="width:100%;background:'+bg+';height:'+pct+'%;border-radius:6px 6px 4px 4px;transition:height .3s;"></div>'
+              + '<div style="font-size:.65rem;color:'+(c.isToday?'var(--primary)':'var(--text-muted)')+';font-weight:'+(c.isToday?'800':'600')+';">'+dayNames[i]+'</div>'
+              + '</div>';
+          }).join('');
+          var endDate = new Date(weekStart); endDate.setDate(weekStart.getDate()+6);
+          setText('homeWeekRange', formatDateAr(toLocalISODate(weekStart)) + ' — ' + formatDateAr(toLocalISODate(endDate)));
+        }
+      } catch(e) { console.warn('renderHomeSection error', e); }
+
+      // تحميل الملاحظات السريعة
+      loadQuickNote();
+
+      function setText(id, val){ var el = document.getElementById(id); if (el) el.textContent = val; }
+    }
+    // ================== ملاحظات سريعة ==================
+    var _noteChanged = false;
+
+    function loadQuickNote() {
+      try {
+        window._fb.getDoc('notes', 'quick').then(function(snap) {
+          if (snap.exists()) {
+            var d = snap.data();
+            var ta = document.getElementById('homeQuickNote');
+            if (ta && d.text) ta.value = d.text;
+            var nd = document.getElementById('homeNoteDate');
+            if (nd && d.savedAt) {
+              var dt = new Date(d.savedAt);
+              nd.textContent = 'آخر تعديل: ' + dt.toLocaleDateString('ar-EG', {day:'numeric',month:'short'}) + ' ' + dt.toLocaleTimeString('ar-EG', {hour:'2-digit',minute:'2-digit'});
+            }
+          }
+        }).catch(function(){
+          // fallback to localStorage
+          var saved = localStorage.getItem('docQuickNote');
+          if (saved) {
+            try { var obj = JSON.parse(saved);
+              var ta = document.getElementById('homeQuickNote'); if (ta) ta.value = obj.text || '';
+            } catch(e) {}
+          }
+        });
+      } catch(e) {}
+    }
+
+    function saveQuickNote() {
+      var ta = document.getElementById('homeQuickNote');
+      if (!ta) return;
+      var text = ta.value;
+      var payload = { text: text, savedAt: Date.now() };
+      var savedEl = document.getElementById('homeNoteSaved');
+      try {
+        window._fb.setDoc(window._fb.docRef('notes', 'quick'), payload).then(function() {
+          if (savedEl) { savedEl.style.display='inline'; setTimeout(function(){ savedEl.style.display='none'; }, 2000); }
+        }).catch(function() {
+          localStorage.setItem('docQuickNote', JSON.stringify(payload));
+          if (savedEl) { savedEl.style.display='inline'; setTimeout(function(){ savedEl.style.display='none'; }, 2000); }
+        });
+      } catch(e) {
+        localStorage.setItem('docQuickNote', JSON.stringify(payload));
+      }
+      _noteChanged = false;
+    }
+
+    function clearQuickNote() {
+      var ta = document.getElementById('homeQuickNote');
+      if (ta) ta.value = '';
+      var nd = document.getElementById('homeNoteDate'); if (nd) nd.textContent = '-';
+      saveQuickNote();
+    }
+
+    function onQuickNoteChange() {
+      _noteChanged = true;
+      // حفظ تلقائي بعد 3 ثواني من التوقف عن الكتابة
+      clearTimeout(window._noteAutoSaveTimer);
+      window._noteAutoSaveTimer = setTimeout(function(){ if (_noteChanged) saveQuickNote(); }, 3000);
+    }
+
+
+    // ===== Rail collapse / expand =====
+    var RAIL_KEY = 'doctorRailExpanded';
+    window.toggleRail = function() {
+      const rail = document.getElementById('mainRail');
+      if (!rail) return;
+      const expanding = !rail.classList.contains('expanded');
+      rail.classList.toggle('expanded', expanding);
+      document.body.classList.toggle('rail-expanded', expanding);
+      const arrow = document.getElementById('railArrowIcon');
+      if (arrow) arrow.style.transform = expanding ? 'rotate(180deg)' : 'rotate(0deg)';
+      try { localStorage.setItem(RAIL_KEY, expanding ? '1' : '0'); } catch (e) {}
+      setTimeout(function() { if (typeof renderScheduleGrid === 'function') renderScheduleGrid(); }, 320);
+    };
+    (function() {
+      try {
+        if (localStorage.getItem(RAIL_KEY) === '1') {
+          const rail = document.getElementById('mainRail');
+          if (rail) {
+            rail.classList.add('expanded');
+            document.body.classList.add('rail-expanded');
+            const arrow = document.getElementById('railArrowIcon');
+            if (arrow) arrow.style.transform = 'rotate(180deg)';
+          }
+        }
+      } catch (e) {}
+    })();
+
+    // ===== قائمة الملف الشخصي المنسدلة في الشريط العلوي =====
+    window.closeTopbarMenu = function () {
+      var m = document.getElementById('topbarMenu'), b = document.getElementById('topbarProfileBtn');
+      if (m) m.hidden = true;
+      if (b) b.setAttribute('aria-expanded', 'false');
+    };
+    window.toggleTopbarMenu = function () {
+      var m = document.getElementById('topbarMenu'), b = document.getElementById('topbarProfileBtn');
+      if (!m) return;
+      var willOpen = m.hidden;
+      m.hidden = !willOpen;
+      if (b) b.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    };
+    document.addEventListener('click', function (e) {
+      var p = document.getElementById('topbarProfile');
+      if (p && !p.contains(e.target)) window.closeTopbarMenu();
+    });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') window.closeTopbarMenu(); });
+
+    // ===== الوضع الليلي =====
+    const THEME_KEY = 'doctorTheme';
+    function syncThemeToggle(dark) {
+      const btn = document.getElementById('themeToggleBtn'), knob = document.getElementById('themeToggleKnob');
+      if (btn)  { btn.setAttribute('aria-checked', dark ? 'true' : 'false'); btn.style.background = dark ? 'var(--primary)' : 'var(--border-strong)'; }
+      if (knob) { knob.style.transform = dark ? 'translateX(-22px)' : 'translateX(0)'; }
+    }
+    window.toggleTheme = function() {
+      const dark = document.body.classList.toggle('theme-dark');
+      try { localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light'); } catch (e) {}
+      syncThemeToggle(dark);
+    };
+    // مفتاح أرشيف العمليات الجراحية — يتبع نمط مفتاح الوضع الليلي نفسه
+    function syncSurgicalToggle(on) {
+      var btn = document.getElementById('surgicalToggleBtn'), knob = document.getElementById('surgicalToggleKnob');
+      if (btn)  { btn.setAttribute('aria-checked', on ? 'true' : 'false'); btn.style.background = on ? 'var(--primary)' : 'var(--border-strong)'; }
+      if (knob) { knob.style.transform = on ? 'translateX(-22px)' : 'translateX(0)'; }
+    }
+    window.toggleSurgicalArchive = function() {
+      settings.surgicalArchive = !settings.surgicalArchive;
+      syncSurgicalToggle(!!settings.surgicalArchive);
+      saveSettingsToLocal(settings);
+      // حدّث زرّ الدخول في الاضبارة إن كانت مفتوحة
+      var _sbtn = document.getElementById('surgeryArchiveBtn');
+      if (_sbtn) _sbtn.style.display = settings.surgicalArchive ? 'flex' : 'none';
+      if (settings.surgicalArchive && typeof _surgeryUpdateBadge === 'function' && currentPatientIdForVisit) _surgeryUpdateBadge(currentPatientIdForVisit);
+      if (typeof _pfSyncSectionsMenu === 'function') _pfSyncSectionsMenu();
+    };
+    (function() { try { if (localStorage.getItem(THEME_KEY) === 'dark') document.body.classList.add('theme-dark'); } catch (e) {} })();
+    document.addEventListener('DOMContentLoaded', function() { syncThemeToggle(document.body.classList.contains('theme-dark')); });
+
+    const SETTINGS_KEY = 'doctorSettings';
+    let settings = {};
+    // تحميل فوري من التخزين المحلي حتى لا تختفي المعلومات عند تحديث الصفحة
+    (function() { try { var raw = localStorage.getItem(SETTINGS_KEY); if (raw) settings = JSON.parse(raw) || {}; } catch (e) {} })();
+    // منع ومضة التطبيق قبل شاشة الإعداد: إن كان الحساب يحتاج إعداداً (حسب المخزّن
+    // المحلي) نُخفي محتوى التطبيق فوراً؛ يُكشف بعد بتّ الأمر (جلب الإعدادات) أو أماناً بعد ٤ث.
+    (function() {
+      try {
+        if (!settings.onboarded && !((settings.specialty || '') + '').trim()) {
+          document.documentElement.classList.add('ob-pending');
+          setTimeout(function() { document.documentElement.classList.remove('ob-pending'); }, 4000);
+        }
+      } catch (e) {}
+    })();
+
+    function applySettings() {
+      const title = settings.title || 'لوحة الطبيب';
+      document.title = title;
+      // مزامنة بطاقة الطبيب في الشريط الجانبي
+      const sidebarName = document.getElementById('sidebarDoctorName');
+      if (sidebarName) sidebarName.textContent = title;
+      // مزامنة profileDisplayName حتى تظهر التحية بالاسم الصحيح
+      const profileName = document.getElementById('profileDisplayName');
+      if (profileName) profileName.textContent = title;
+      const sidebarAvatar = document.getElementById('sidebarDoctorAvatar');
+      if (sidebarAvatar) {
+        sidebarAvatar.innerHTML = settings.logo
+          ? `<img src="${settings.logo}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`
+          : `<i class="fas fa-user-md"></i>`;
+      }
+      // هيدر الموبايل: صورة الطبيب + اسمه
+      const mtbAvatar = document.getElementById('mtbAvatar');
+      if (mtbAvatar) mtbAvatar.innerHTML = settings.logo ? `<img src="${settings.logo}">` : `<i class="fas fa-user-md"></i>`;
+      const mtbName = document.getElementById('mtbName');
+      if (mtbName) {
+        let hn = (settings.title || '').trim();
+        if (hn && hn !== 'لوحة الطبيب' && !/^(د\.?\s|دكتور)/.test(hn)) hn = 'د. ' + hn;
+        mtbName.textContent = hn || 'لوحة الطبيب';
+      }
+      // تحديث التحية فوراً بالاسم الجديد
+      if (typeof renderHomeSection === 'function') renderHomeSection();
+    }
+
+    function saveSettingsToLocal(s) {
+      try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch (e) {}
+      window._fb.setDoc(window._fb.docRef('settings', 'doctor'), s, { merge: true })
+        .catch(function(e) { console.error('settings save error', e); });
+    }
+
+    window.switchSettingsPanel = function(panel) {
+      document.querySelectorAll('.spanel').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.sni, .stab').forEach(el => el.classList.remove('active'));
+      const p = document.getElementById('spanel-' + panel);
+      if (p) p.classList.add('active');
+      document.querySelectorAll('[data-panel="' + panel + '"]').forEach(el => el.classList.add('active'));
+    };
+    window.autoSaveSettings = function() {
+      const t = (document.getElementById('settingsTitleInput') || {}).value || '';
+      if (t.trim()) settings.title = t.trim();
+      settings.specialty = (document.getElementById('settingsSpecialtyInput') || {}).value || '';
+      settings.address   = (document.getElementById('settingsAddressInput') || {}).value || '';
+      settings.mobile    = (document.getElementById('settingsMobileInput') || {}).value || '';
+      settings.landline  = (document.getElementById('settingsLandlineInput') || {}).value || '';
+      saveSettingsToLocal(settings);
+      applySettings();
+    };
+    window.openSettingsModal = function() {
+      switchSettingsPanel('profile');
+      syncThemeToggle(document.body.classList.contains('theme-dark'));
+      document.getElementById('settingsTitleInput').value = settings.title || 'لوحة الطبيب';
+      document.getElementById('profileDisplayName').textContent = settings.title || 'لوحة الطبيب';
+      if (document.getElementById('profileSubtitle')) document.getElementById('profileSubtitle').textContent = settings.specialty || 'طبيب';
+      document.getElementById('settingsSpecialtyInput').value = settings.specialty || '';
+      document.getElementById('settingsAddressInput').value = settings.address || '';
+      document.getElementById('settingsMobileInput').value = settings.mobile || '';
+      document.getElementById('settingsLandlineInput').value = settings.landline || '';
+      const previewImg  = document.getElementById('logoPreviewImg');
+      const previewIcon = document.getElementById('logoPreviewIcon');
+      const removeBtn   = document.getElementById('removeLogoBtn');
+      if (settings.logo) {
+        previewImg.src = settings.logo; previewImg.classList.remove('hidden');
+        previewIcon.classList.add('hidden'); removeBtn.classList.remove('hidden');
+      } else {
+        previewImg.classList.add('hidden'); previewIcon.classList.remove('hidden'); removeBtn.classList.add('hidden');
+      }
+      document.getElementById('settingsModal').classList.remove('hidden');
+    };
+    window.closeSettingsModal = function() {
+      document.getElementById('settingsModal').classList.add('hidden');
+    };
+    window.saveSettings = function() { autoSaveSettings(); closeSettingsModal(); };
+
+    window.removeLogo = function() {
+      settings.logo = null;
+      document.getElementById('logoPreviewImg').classList.add('hidden');
+      document.getElementById('logoPreviewIcon').classList.remove('hidden');
+      document.getElementById('removeLogoBtn').classList.add('hidden');
+      document.getElementById('logoFileInput').value = '';
+      saveSettingsToLocal(settings);
+      applySettings();
+    };
+
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('logoFileInput').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (!file.type.startsWith('image/')) { showToast('الرجاء اختيار ملف صورة','error'); return; }
+        if (file.size > 5*1024*1024) { showToast('حجم الصورة يجب أن يكون أقل من 5 ميغابايت','error'); return; }
+        showToast('جاري رفع الصورة…','');
+        window._fb.uploadLogo('doctor', file).then(function(url) {
+          settings.logo = url;
+          const previewImg  = document.getElementById('logoPreviewImg');
+          const previewIcon = document.getElementById('logoPreviewIcon');
+          const removeBtn   = document.getElementById('removeLogoBtn');
+          previewImg.src = url; previewImg.classList.remove('hidden');
+          previewIcon.classList.add('hidden'); removeBtn.classList.remove('hidden');
+          saveSettingsToLocal(settings);
+          applySettings();
+          showToast('تم رفع الصورة بنجاح','success');
+        }).catch(function(err) { showToast('فشل رفع الصورة','error'); console.error(err); });
+      });
+      applySettings();
+    });
+
+    // إغلاق مودال الإعدادات بالضغط خارجه
+    document.getElementById('settingsModal')?.addEventListener('click', function(e) {
+      if (e.target === this) closeSettingsModal();
+    });
+
+
+/* ===== FAB Speed Dial ===== */
+    // ── مفاتيح localStorage ──
+    const NURSE_ALERT_KEY    = 'nurseAlert';
+    const CUSTOM_ALERT_KEY   = 'nurseCustomAlert';
+
+    let customAlertData = { label: 'تنبيه مخصص', desc: 'تنبيه من الدكتور' };
+    function updateCustomLabels(label) {
+      document.querySelectorAll('#customAlertLabel, #customAlertLabelDesk').forEach(el => el.textContent = label);
+    }
+    updateCustomLabels(customAlertData.label);
+
+    // ── إنشاء الأصوات بـ Web Audio API ──
+    function createAudioCtx() { return new (window.AudioContext || window.webkitAudioContext)(); }
+
+    function playSound(type) {
+      try {
+        const ctx = createAudioCtx();
+        const gain = ctx.createGain();
+        gain.connect(ctx.destination);
+        gain.gain.setValueAtTime(0.6, ctx.currentTime);
+
+        if (type === 'next') {
+          // نغمة صاعدة مبهجة — ثلاث نبضات
+          [0, 0.18, 0.36].forEach((t, i) => {
+            const o = ctx.createOscillator();
+            o.connect(gain);
+            o.type = 'sine';
+            o.frequency.setValueAtTime([520, 660, 780][i], ctx.currentTime + t);
+            o.start(ctx.currentTime + t);
+            o.stop(ctx.currentTime + t + 0.15);
+          });
+
+        } else if (type === 'enter') {
+          // نبضتان قصيرتان — تنبيه رسمي
+          [0, 0.25].forEach((t) => {
+            const o = ctx.createOscillator();
+            o.connect(gain);
+            o.type = 'square';
+            o.frequency.setValueAtTime(440, ctx.currentTime + t);
+            gain.gain.setValueAtTime(0.3, ctx.currentTime + t);
+            gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + t + 0.2);
+            o.start(ctx.currentTime + t);
+            o.stop(ctx.currentTime + t + 0.22);
+          });
+
+        } else if (type === 'custom') {
+          // صوت منخفض هادئ — مختلف تماماً
+          const o = ctx.createOscillator();
+          o.connect(gain);
+          o.type = 'triangle';
+          o.frequency.setValueAtTime(300, ctx.currentTime);
+          o.frequency.linearRampToValueAtTime(500, ctx.currentTime + 0.3);
+          gain.gain.setValueAtTime(0.5, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.6);
+          o.start(ctx.currentTime);
+          o.stop(ctx.currentTime + 0.6);
+        }
+
+        setTimeout(() => ctx.close(), 1500);
+      } catch(e) { console.warn('Audio error:', e); }
+    }
+
+
+    // ── FAB دوال زر الزائد (لوحة الطبيب) ──
+    function toggleMobDocFab() {
+      var trigger  = document.getElementById('mobDocFabTrigger');
+      var pills    = document.getElementById('mobDocPills');
+      var isOpen   = trigger && trigger.classList.contains('open');
+      if (isOpen) { closeMobDocFab(); return; }
+      if (trigger)  trigger.classList.add('open');
+      if (pills)    pills.classList.add('active');
+    }
+    function closeMobDocFab() {
+      var trigger  = document.getElementById('mobDocFabTrigger');
+      var pills    = document.getElementById('mobDocPills');
+      if (trigger)  trigger.classList.remove('open');
+      if (pills)    pills.classList.remove('active');
+    }
+    // ── Draggable Desktop FAB (Doctor) ──
+    (function() {
+      var FAB_KEY = 'docFabPos2';   // v2: الموضع الافتراضي صار تحت حاوية الشريط الجانبي
+      var fabEl, pillsEl, _docWasDragged = false;
+      window._docWasDragged = function() { return _docWasDragged; };
+      window._docResetDragged = function() { _docWasDragged = false; };
+
+      function defaultFabPos() {
+        // تحت الكبسولة الجانبية (المتوسّطة عمودياً): نصف ارتفاعها ≈ 169، + فجوة + حجم الزرّ
+        var vh = window.innerHeight || 800;
+        return { right: 22, bottom: Math.max(80, Math.round(vh / 2 - 231)) };
+      }
+      function getFabPos() {
+        try { var s = localStorage.getItem(FAB_KEY); if (s) { var p = JSON.parse(s); return clampPos(p); } } catch(e) {}
+        return defaultFabPos();
+      }
+      function saveFabPos(pos) {
+        try { localStorage.setItem(FAB_KEY, JSON.stringify(pos)); } catch(e) {}
+      }
+
+      function clampPos(pos) {
+        var vw = window.innerWidth;
+        var vh = window.innerHeight;
+        var size = 48;
+        var margin = 8;
+        return {
+          right:  Math.max(margin, Math.min(vw  - size - margin, pos.right)),
+          bottom: Math.max(margin, Math.min(vh  - size - margin, pos.bottom))
+        };
+      }
+
+      function applyFabPos(pos) {
+        var clamped = clampPos(pos);
+        fabEl.style.left   = '';
+        fabEl.style.top    = '';
+        fabEl.style.right  = clamped.right  + 'px';
+        fabEl.style.bottom = clamped.bottom + 'px';
+      }
+
+      function positionPills() {
+        if (!pillsEl || !fabEl) return;
+        var vw = window.innerWidth;
+        var vh = window.innerHeight;
+        var fr = parseFloat(fabEl.style.right)  || 22;
+        var fb = parseFloat(fabEl.style.bottom) || 36;
+        var fabSize = 48;
+        var gap = 8;
+
+        var pillH  = 52;
+        var pillGap = 10;
+        var count  = pillsEl.querySelectorAll('.doc-fab-pill').length;
+        var totalH = count * pillH + (count - 1) * pillGap;
+
+        // Space available above FAB top edge and below FAB bottom edge
+        var spaceAbove = vh - fb - fabSize; // from FAB top to screen top
+        var spaceBelow = fb;                // from FAB bottom to screen bottom
+
+        var openUp = spaceAbove >= spaceBelow;
+
+        pillsEl.style.flexDirection = openUp ? 'column-reverse' : 'column';
+        pillsEl.style.top    = '';
+        pillsEl.style.bottom = '';
+
+        if (openUp) {
+          // pills sit above the FAB — anchor by bottom
+          pillsEl.style.bottom = (fb + fabSize + gap) + 'px';
+        } else {
+          // pills sit below the FAB — anchor by bottom (negative offset below FAB)
+          pillsEl.style.bottom = (fb - totalH - gap) + 'px';
+        }
+
+        // Horizontal alignment
+        var fabLeftEdge = vw - fr - fabSize;
+        var isRight = fr < vw / 2;
+
+        if (isRight) {
+          pillsEl.style.right      = fr + 'px';
+          pillsEl.style.left       = '';
+          pillsEl.style.alignItems = 'flex-end';
+        } else {
+          pillsEl.style.left       = fabLeftEdge + 'px';
+          pillsEl.style.right      = '';
+          pillsEl.style.alignItems = 'flex-start';
+        }
+      }
+
+      function initDraggableFab() {
+        fabEl   = document.getElementById('docDesktopSpeedDial');
+        pillsEl = document.getElementById('docDesktopPills');
+        if (!fabEl) return;
+
+        // Apply saved position THEN show — prevents flash at default CSS position
+        var pos = getFabPos();
+        applyFabPos(pos);
+        requestAnimationFrame(function() {
+          fabEl.style.opacity = '1';
+        });
+
+        var startX, startY, startRight, startBottom, dragging = false;
+
+        function onPointerDown(e) {
+          if (e.target.closest('button.doc-fab-trigger') === null) return;
+          dragging       = false;
+          _docWasDragged = false;
+          startX         = e.clientX;
+          startY         = e.clientY;
+          startRight     = parseFloat(fabEl.style.right)  || 36;
+          startBottom    = parseFloat(fabEl.style.bottom) || 36;
+          window.addEventListener('pointermove', onPointerMove);
+          window.addEventListener('pointerup',   onPointerUp);
+          e.preventDefault();
+        }
+
+        function onPointerMove(e) {
+          var dx = e.clientX - startX;
+          var dy = e.clientY - startY;
+          if (!dragging && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+          if (!dragging) { closeDocFabDial(); } // أغلق pills عند بدء السحب
+          dragging = true;
+          _docWasDragged = true;
+          fabEl.classList.add('dragging');
+
+          // right decreases when moving right (dx positive), increases when moving left
+          // bottom increases when moving up (dy negative), decreases when moving down
+          var newRight  = startRight  - dx;
+          var newBottom = startBottom - dy;
+
+          applyFabPos({ right: newRight, bottom: newBottom });
+          if (pillsEl) positionPills();
+        }
+
+        function onPointerUp(e) {
+          window.removeEventListener('pointermove', onPointerMove);
+          window.removeEventListener('pointerup',   onPointerUp);
+          fabEl.classList.remove('dragging');
+          if (dragging) {
+            saveFabPos({ right: parseFloat(fabEl.style.right)||36, bottom: parseFloat(fabEl.style.bottom)||36 });
+          }
+          dragging = false;
+        }
+
+        fabEl.addEventListener('pointerdown', onPointerDown);
+        window.addEventListener('resize', function() {
+          // Re-clamp on resize in case window shrunk
+          var cur = { right: parseFloat(fabEl.style.right)||36, bottom: parseFloat(fabEl.style.bottom)||36 };
+          applyFabPos(cur);
+          positionPills();
+        });
+      }
+
+      window._docPositionPills = positionPills;
+
+      document.addEventListener('DOMContentLoaded', initDraggableFab);
+    })();
+
+    function toggleDocFabDial() {
+      var trigger  = document.getElementById('docDesktopFabMain');
+      if (!trigger || (window._docWasDragged && window._docWasDragged())) { if(window._docResetDragged) window._docResetDragged(); return; }
+      var isOpen   = trigger.classList.contains('open');
+      if (isOpen) { closeDocFabDial(); return; }
+      if (window._docPositionPills) window._docPositionPills();
+      trigger.classList.add('open');
+      _docFabScrim(true);   // تغبيش ما خلف القائمة
+      document.querySelectorAll('#docDesktopPills .doc-fab-pill').forEach(function(p){ p.classList.add('visible'); });
+      // إغلاق عند الضغط خارج الـ FAB
+      setTimeout(function() {
+        document.addEventListener('click', _docOutsideHandler);
+      }, 0);
+    }
+    function _docOutsideHandler(e) {
+      var fab   = document.getElementById('docDesktopSpeedDial');
+      var pills = document.getElementById('docDesktopPills');
+      if ((fab && fab.contains(e.target)) || (pills && pills.contains(e.target))) return;
+      closeDocFabDial();
+      document.removeEventListener('click', _docOutsideHandler);
+    }
+    function closeDocFabDial() {
+      var trigger  = document.getElementById('docDesktopFabMain');
+      var pills    = document.getElementById('docDesktopPills');
+      if (trigger)  trigger.classList.remove('open');
+      if (pills)    document.querySelectorAll('#docDesktopPills .doc-fab-pill').forEach(function(p){ p.classList.remove('visible'); });
+      _docFabScrim(false);
+      document.removeEventListener('click', _docOutsideHandler);
+    }
+    // طبقة تغبيش خلف قائمة الزرّ العائم — نقرة عليها تُغلق
+    function _docFabScrim(show) {
+      var s = document.getElementById('docFabScrim');
+      if (show) {
+        if (!s) {
+          s = document.createElement('div');
+          s.id = 'docFabScrim';
+          s.addEventListener('click', closeDocFabDial);
+          document.body.appendChild(s);
+        }
+        requestAnimationFrame(function() { s.classList.add('show'); });
+      } else if (s) {
+        s.classList.remove('show');
+        setTimeout(function() { var el = document.getElementById('docFabScrim'); if (el && !el.classList.contains('show')) el.remove(); }, 220);
+      }
+    }
+
+    // ── إرسال التنبيه (من ملف الدكتور) ──
+    window.sendNurseAlert = function(type) {
+      var label = type === 'next'  ? 'أدخل المريض التالي' :
+                  type === 'enter' ? 'استدعاء الممرضة' :
+                  (customAlertData.label || 'تنبيه مخصص');
+      // ١. Firestore أولاً للحصول على doc ID
+      window._fb.addDoc(window._fb.col('alerts'), {
+        type:      type,
+        direction: 'doctorToNurse',
+        message:   label,
+        read:      false,
+        createdAt: window._fb.serverTimestamp(),
+        expireAt:  new Date(Date.now() + 30*24*60*60*1000) // حذف تلقائي بعد ٣٠ يوماً (TTL)
+      }).then(function(docRef) {
+        // ٢. BroadcastChannel مع نفس doc ID
+        var payload = { type: type, direction: 'doctorToNurse', message: label, ts: Date.now(), docId: docRef.id };
+        try { new BroadcastChannel('nurseAlerts').postMessage(payload); } catch(e) {}
+      }).catch(function(e) { console.error('alert send', e); });
+    };
+
+    // ── تخصيص الزر الثالث ──
+    window.openCustomAlertEdit = function() {
+      document.getElementById('customAlertTextInput').value = customAlertData.label;
+      document.getElementById('customAlertDescInput').value = customAlertData.desc;
+      document.getElementById('customAlertModal').classList.remove('hidden');
+    };
+    window.closeCustomAlertEdit = function() {
+      document.getElementById('customAlertModal').classList.add('hidden');
+    };
+    window.saveCustomAlert = function() {
+      const label = document.getElementById('customAlertTextInput').value.trim() || 'تنبيه مخصص';
+      const desc  = document.getElementById('customAlertDescInput').value.trim() || 'تنبيه من الدكتور';
+      customAlertData = { label, desc };
+      window._fb.setDoc(window._fb.docRef('config', 'customAlert'), customAlertData)
+        .catch(function(e) { console.error(e); });
+      updateCustomLabels(label);
+      closeCustomAlertEdit();
+    };
+
+
+
+
+/* ===== Custom Alert & Contacts ===== */
+
+  // ── تسجيل الخروج عبر Firebase ──
+  // زر تسجيل الخروج للعرض فقط — معطّل (لا يسجّل خروجاً)
+  window.docbookSignOut = function() {
+    // ⚠️ مؤقّت: علامة تجعل شاشة الإعداد تظهر عند الدخول التالي (للمعاينة).
+    //    تُحذف هذه الأسطر الثلاثة مع _OB_PREVIEW_AFTER_LOGOUT عند انتهاء التجربة.
+    try {
+      if (typeof _OB_PREVIEW_AFTER_LOGOUT !== 'undefined' && _OB_PREVIEW_AFTER_LOGOUT) {
+        localStorage.setItem(_OB_PREVIEW_KEY, '1');
+      }
+    } catch (e) {}
+    function go(){ location.replace('index.html'); }
+    try { window._fb.signOut().then(go).catch(go); } catch(e){ go(); }
+  };
+  
+
+/* ===== Alert Banner ===== */
+    function showDoctorAlert(title, sub) {
+      var banner = document.getElementById('doctorAlertBanner');
+      if (!banner) return;
+      if (title) document.getElementById('alertBannerTitle').textContent = title;
+      if (sub)   document.getElementById('alertBannerSub').textContent   = sub;
+      banner.classList.add('show');
+      if (window._alertBannerTimer) clearTimeout(window._alertBannerTimer);
+      window._alertBannerTimer = setTimeout(function() { closeDoctorAlert(); }, 8000);
+    }
+    function closeDoctorAlert() {
+      var banner = document.getElementById('doctorAlertBanner');
+      if (banner) banner.classList.remove('show');
+      if (window._alertBannerTimer) clearTimeout(window._alertBannerTimer);
+    }
+
+/* ===== Patient Chart & Print ===== */
+    // ══════════════════════════════════════════════
+    // نظام جهات التواصل — صيدليات ومختبرات
+    // ══════════════════════════════════════════════
+
+    var _contacts = [];
+    var _editingContactId = null;
+    var _CONTACTS_KEY = 'docbook_contacts';
+    function _contactTypeLabel(t) { return t === 'lab' ? 'مختبر' : (t === 'imaging' ? 'مركز أشعة' : 'صيدلية'); }
+    function _contactTypeClass(t) { return t === 'lab' ? 'contact-type-lab' : (t === 'imaging' ? 'contact-type-imaging' : 'contact-type-pharmacy'); }
+
+    // ── تحميل وحفظ من Firestore ──
+    function loadContacts(cb) {
+      if (window._fbReady) {
+        window._fb.getDoc('config', 'contacts').then(function(snap) {
+          _contacts = snap.exists() ? (snap.data().list || []) : [];
+          if (cb) cb();
+        }).catch(function() { _contacts = []; if (cb) cb(); });
+      } else {
+        window.addEventListener('fbReady', function() { loadContacts(cb); }, { once: true });
+      }
+    }
+
+    function saveContactsToFirestore() {
+      if (!window._fbReady) return;
+      window._fb.setDoc(window._fb.docRef('config', 'contacts'), { list: _contacts }, { merge: true })
+        .catch(function(e) { console.error('contacts save', e); });
+    }
+
+    // ── النسخة الاحتياطية: تنزيل كل بيانات العيادة كملف JSON ──
+    window.downloadBackup = async function() {
+      if (!window._fbReady) { showToast('الاتصال بقاعدة البيانات لم يكتمل بعد', 'error'); return; }
+      var btn = document.getElementById('backupBtn');
+      var oldHtml = btn ? btn.innerHTML : '';
+      if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جارٍ التحضير...'; }
+      try {
+        var fb = window._fb;
+        // جلب كل البيانات كاملةً (بلا حدود — النسخة في الذاكرة محدودة بـ limit)
+        var patientsSnap = await fb.getDocs(fb.col('patients'));
+        var apptSnap     = await fb.getDocs(fb.col('appointments'));
+        var alertsSnap   = await fb.getDocs(fb.col('alerts'));
+        var settingsSnap = await fb.getDoc('settings', 'doctor');
+        var contactsSnap = await fb.getDoc('config', 'contacts');
+        var closedSnap   = await fb.getDoc('config', 'closedDays');
+        var alertCfgSnap = await fb.getDoc('config', 'customAlert');
+        var mapDocs = function(snap) { return snap.docs.map(function(d) { return Object.assign({ id: d.id }, d.data()); }); };
+
+        var backup = {
+          _meta: {
+            app: 'DocBook',
+            clinicType: (typeof CLINIC_TYPE !== 'undefined' ? CLINIC_TYPE : 'doctor'),
+            schema: 1,
+            exportedAt: new Date().toISOString(),
+            exportedBy: (fb.auth.currentUser && fb.auth.currentUser.email) || null
+          },
+          patients:     mapDocs(patientsSnap),
+          appointments: mapDocs(apptSnap),
+          alerts:       mapDocs(alertsSnap),
+          settings:     settingsSnap.exists() ? settingsSnap.data() : null,
+          contacts:     contactsSnap.exists() ? contactsSnap.data() : null,
+          closedDays:   closedSnap.exists()   ? closedSnap.data()   : null,
+          customAlert:  alertCfgSnap.exists()  ? alertCfgSnap.data()  : null
+        };
+        backup._meta.counts = {
+          patients: backup.patients.length,
+          appointments: backup.appointments.length,
+          alerts: backup.alerts.length
+        };
+
+        var json = JSON.stringify(backup, null, 2);
+        var blob = new Blob([json], { type: 'application/json' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'docbook-backup-' + backup._meta.clinicType + '-' + new Date().toISOString().slice(0, 10) + '.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
+        showToast('تم تنزيل النسخة الاحتياطية (' + backup._meta.counts.patients + ' مريض، ' + backup._meta.counts.appointments + ' موعد)', 'success');
+      } catch (e) {
+        console.error('backup', e);
+        showToast('تعذّر إنشاء النسخة الاحتياطية', 'error');
+      } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = oldHtml; }
+      }
+    };
+
+    // ── فتح مدير جهات التواصل ──
+    window.openContactsManager = function() {
+      document.getElementById('contactsModal').classList.remove('hidden');
+      _editingContactId = null;
+      document.getElementById('contactSaveBtnText').textContent = '+ إضافة';
+      document.getElementById('contactNameInput').value = '';
+      document.getElementById('contactPhoneInput').value = '';
+      loadContacts(renderContactsList);
+    };
+
+    window.closeContactsManager = function() {
+      document.getElementById('contactsModal').classList.add('hidden');
+    };
+
+    function renderContactsList() {
+      var list = document.getElementById('contactsList');
+      if (!list) return;
+      if (!_contacts.length) {
+        list.innerHTML = '<div style="text-align:center;color:var(--text-muted);font-size:.85rem;padding:20px;">لا توجد جهات تواصل بعد</div>';
+        return;
+      }
+      list.innerHTML = _contacts.map(function(ct) {
+        var typeLabel = _contactTypeLabel(ct.type);
+        var typeIcon  = ct.type === 'lab' ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v11l-4 4a2 2 0 0 0 1.41 3.41H17.6A2 2 0 0 0 19 18l-4-4V3"/></svg>' : (ct.type === 'imaging' ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 7v10M12 7v10M17 7v10"/></svg>' : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/><line x1="12" y1="6" x2="12" y2="10"/><line x1="10" y1="8" x2="14" y2="8"/></svg>');
+        var typeClass = _contactTypeClass(ct.type);
+        return '<div class="contact-card">' +
+          '<div class="contact-card-info">' +
+          '<div style="display:flex;align-items:center;gap:6px;">' +
+          '<span class="contact-card-name">' + ct.name + '</span>' +
+          '<span class="contact-card-type ' + typeClass + '" style="display:flex;align-items:center;gap:3px;">' + typeIcon + ' ' + typeLabel + '</span>' +
+          '</div>' +
+          '<span class="contact-card-phone">' + ct.phone + '</span>' +
+          '</div>' +
+          '<div style="display:flex;gap:6px;">' +
+          '<button onclick="editContact(' + JSON.stringify(ct.id) + ')" style="background:var(--primary-light);border:none;border-radius:8px;padding:6px 10px;cursor:pointer;color:var(--primary);">' +
+          '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>' +
+          '</button>' +
+          '<button onclick="deleteContact(' + JSON.stringify(ct.id) + ')" style="background:#fee2e2;border:none;border-radius:8px;padding:6px 10px;cursor:pointer;color:#dc2626;">' +
+          '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>' +
+          '</button>' +
+          '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    window.saveContact = function() {
+      var name  = document.getElementById('contactNameInput').value.trim();
+      var phone = document.getElementById('contactPhoneInput').value.trim().replace(/[^0-9+]/g,'');
+      var type  = document.getElementById('contactTypeInput').value;
+      if (!name || !phone) { showToast('أدخل الاسم ورقم الهاتف', 'error'); return; }
+      if (_editingContactId) {
+        var idx = _contacts.findIndex(function(c) { return c.id === _editingContactId; });
+        if (idx !== -1) { _contacts[idx].name = name; _contacts[idx].phone = phone; _contacts[idx].type = type; }
+        _editingContactId = null;
+        document.getElementById('contactSaveBtnText').textContent = '+ إضافة';
+      } else {
+        _contacts.push({ id: Date.now(), name: name, phone: phone, type: type });
+      }
+      document.getElementById('contactNameInput').value = '';
+      document.getElementById('contactPhoneInput').value = '';
+      saveContactsToFirestore();
+      renderContactsList();
+      showToast('تم الحفظ', 'success');
+    };
+
+    window.editContact = function(id) {
+      var ct = _contacts.find(function(c) { return c.id === id; });
+      if (!ct) return;
+      _editingContactId = id;
+      document.getElementById('contactNameInput').value  = ct.name;
+      document.getElementById('contactPhoneInput').value = ct.phone;
+      document.getElementById('contactTypeInput').value  = ct.type;
+      document.getElementById('contactSaveBtnText').textContent = '💾 تحديث';
+      document.getElementById('contactNameInput').focus();
+    };
+
+    window.deleteContact = function(id) {
+      _contacts = _contacts.filter(function(c) { return c.id !== id; });
+      saveContactsToFirestore();
+      renderContactsList();
+    };
+
+    // ── فتح مودال الإرسال للصيدلية/مختبر ──
+    window.openSendToContact = function() {
+      // اجمع النص من حقول الكتابة
+      var prescription = (document.getElementById('prescriptionText')?.value || '').trim();
+      var note         = (document.getElementById('noteText')?.value || '').trim();
+      var msg = '';
+      if (prescription) msg += 'الوصفة الطبية:\n' + prescription;
+      if (note) msg += (msg ? '\n\n' : '') + 'الملاحظات:\n' + note;
+      // fallback لمودال العرض
+      if (!msg) msg = (document.getElementById('whatsappMsgInput')?.value || '').trim();
+      if (!msg) { showToast('أكتب الوصفة أو الملاحظة أولاً', 'error'); return; }
+      document.getElementById('sendToContactModal').classList.remove('hidden');
+      renderSendContactList(msg);
+    };
+
+    window.closeSendToContact = function() {
+      document.getElementById('sendToContactModal').classList.add('hidden');
+    };
+
+    function renderSendContactList(msg) {
+      var list  = document.getElementById('sendContactList');
+      var empty = document.getElementById('sendContactEmpty');
+      loadContacts(function() {
+        if (!_contacts.length) {
+          list.style.display = 'none';
+          empty.style.display = 'block';
+          return;
+        }
+        empty.style.display = 'none';
+        list.style.display  = 'block';
+        list.innerHTML = _contacts.map(function(ct) {
+          var typeLabel = _contactTypeLabel(ct.type);
+        var typeIcon  = ct.type === 'lab' ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v11l-4 4a2 2 0 0 0 1.41 3.41H17.6A2 2 0 0 0 19 18l-4-4V3"/></svg>' : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/><line x1="12" y1="6" x2="12" y2="10"/><line x1="10" y1="8" x2="14" y2="8"/></svg>';
+          var typeClass = _contactTypeClass(ct.type);
+          return '<div class="contact-card" style="margin-bottom:8px;">' +
+            '<div class="contact-card-info">' +
+            '<div style="display:flex;align-items:center;gap:6px;">' +
+            '<span class="contact-card-name">' + ct.name + '</span>' +
+            '<span class="contact-card-type ' + typeClass + '" style="display:flex;align-items:center;gap:3px;">' + typeIcon + ' ' + typeLabel + '</span>' +
+            '</div>' +
+            '<span class="contact-card-phone">' + ct.phone + '</span>' +
+            '</div>' +
+            '<button class="btn-send-contact" onclick="sendToContactWhatsApp(' + JSON.stringify(ct.phone) + ',' + JSON.stringify(msg) + ')">' +
+            '<svg width="14" height="14" viewBox="0 0 24 24" fill="white"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.126.556 4.121 1.524 5.855L0 24l6.336-1.504A11.955 11.955 0 0 0 12 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 22c-1.885 0-3.652-.516-5.168-1.416l-.371-.22-3.762.893.951-3.66-.24-.387A9.956 9.956 0 0 1 2 12C2 6.478 6.478 2 12 2s10 4.478 10 10-4.478 10-10 10z"/></svg> إرسال' +
+            '</button>' +
+            '</div>';
+        }).join('');
+      });
+    }
+
+    window.sendToContactWhatsApp = function(phone, msg) {
+      var cleaned = phone.replace(/[^0-9+]/g, '');
+      if (!cleaned.startsWith('+')) cleaned = '+' + cleaned;
+      var url = 'https://wa.me/' + cleaned + '?text=' + encodeURIComponent(msg);
+      window.open(url, '_blank');
+      closeSendToContact();
+    };
+
+    // ==================== الروزنامة في الصفحة الرئيسية ====================
+    let homeCalDate = new Date(currentDate);
+
+    function renderHomeCalendar() {
+      const grid = document.getElementById('homeCalGrid');
+      if (!grid) return;
+      grid.innerHTML = '';
+      const year = homeCalDate.getFullYear(), month = homeCalDate.getMonth();
+      document.getElementById('homeCurrentMonth').textContent = `${monthsAr[month]} ${year}`;
+      const firstDay = new Date(year, month, 1).getDay();
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      let startOffset = (firstDay + 2) % 7;
+      for (let i = startOffset - 1; i >= 0; i--) {
+        const d = document.createElement('div');
+        d.className = 'compact-calendar-day other-month';
+        d.textContent = '';
+        grid.appendChild(d);
+      }
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dateObj = new Date(year, month, d); dateObj.setHours(0,0,0,0);
+        const dateStr = toLocalISODate(dateObj);
+        const dayDiv = document.createElement('div');
+        dayDiv.className = 'compact-calendar-day';
+        dayDiv.textContent = d;
+        if (dateObj < today) dayDiv.classList.add('past-day');
+        if (dateObj.getTime() === today.getTime()) dayDiv.classList.add('today');
+        if (selectedDayStr === dateStr) dayDiv.classList.add('selected');
+        const dayRecords = allRecords.filter(r =>
+          ['Accepted', 'Visited', 'NoShow'].includes(r.Status) && r.Date === dateStr
+        );
+        if (dayRecords.length > 0) {
+          const dot = document.createElement('div');
+          dot.className = `compact-appointment-dot ${dayRecords.length <= 2 ? 'compact-dot-low' : dayRecords.length <= 4 ? 'compact-dot-medium' : 'compact-dot-high'}`;
+          dayDiv.appendChild(dot);
+        }
+        dayDiv.addEventListener('click', () => selectHomeDay(dateStr));
+        grid.appendChild(dayDiv);
+      }
+      // تحديث لوحة اليوم دائماً (تظهر اليوم الحالي افتراضياً وتنعش عند وصول البيانات)
+      const panel = document.getElementById('homeDayPanel');
+      if (panel) {
+        renderHomeDayPanel(selectedDayStr || todayStr);
+        panel.style.display = 'flex';   // flex لا block: اللوحة عمود مرن كي تملأ الارتفاع المتبقّي
+        syncHomeColHeight();
+      }
+    }
+
+    function selectHomeDay(dateStr) {
+      selectedDayStr = dateStr;
+      renderHomeCalendar();
+      renderCalendar(); // sync with calendar section
+      renderHomeDayPanel(dateStr);
+      const panel = document.getElementById('homeDayPanel');
+      if (panel) panel.style.display = 'flex';   // flex لا block: اللوحة عمود مرن كي تملأ الارتفاع المتبقّي
+      syncHomeColHeight();
+    }
+
+    /* كرت موعد اليوم — أعيد بناؤه بأصناف CSS بدل ستايلات inline متناثرة.
+       الحالة تُقرأ من شريط جانبي رفيع + شارة، لا من خلفية ملوّنة للكرت كلّه. */
+    function homeApptCard(r) {
+      var t = slotTimeOf(r);
+      var S = {
+        Visited:   { cls: 'done',   label: 'تمت' },
+        NoShow:    { cls: 'noshow', label: 'لم يحضر' },
+        Cancelled: { cls: 'cancel', label: 'ملغاة' },
+        Rejected:  { cls: 'cancel', label: 'ملغاة' }
+      }[r.Status];
+
+      var right = S
+        ? '<span class="ac-badge ac-' + S.cls + '">' + S.label + '</span>'
+        : '<div class="ac-acts">'
+            + '<a href="tel:' + normalizePhone(r.Phone) + '" onclick="event.stopPropagation();" class="ac-btn" title="اتصال" aria-label="اتصال">'
+              + '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2Z"/></svg></a>'
+            + '<button onclick="event.stopPropagation();openAppointmentDetailsModal(\'' + r.id + '\')" class="ac-btn" title="التفاصيل" aria-label="التفاصيل">'
+              + '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg></button>'
+          + '</div>';
+
+      /* كليك يمين → إضبارة المريض — نفس سلوك بطاقات الروزنامة تماماً:
+         openChartFromAppt تفتح الإضبارة إن كان مربوطاً، وإلا تُظهر رسالة
+         «لا يمتلك إضبارة بعد» بدل فتح إضبارة شخص آخر. */
+      return '<div data-appt-id="' + r.id + '" class="ac' + (S ? ' ac-s-' + S.cls : '') + '"'
+        + ' onclick="openAppointmentDetailsModal(\'' + r.id + '\')"'
+        + ' oncontextmenu="event.preventDefault();openChartFromAppt(\'' + r.id + '\');return false;"'
+        + ' title="كليك يمين: فتح إضبارة المريض">'
+        + '<span class="ac-time">' + t + '</span>'
+        + '<div class="ac-who"><p class="ac-name">' + escapeHtml(r.PatientName || '') + '</p>'
+          + '<p class="ac-type">' + escapeHtml(r.VisitType || '') + '</p></div>'
+        + right + '</div>';
+    }
+
+    // ضغط طويل على كرت الموعد (موبايل) → فتح إضبارة المريض
+    (function() {
+      var lpTimer = null, lpFired = false, sx = 0, sy = 0;
+      document.addEventListener('touchstart', function(e) {
+        var card = e.target.closest && e.target.closest('[data-appt-id]');
+        if (!card) return;
+        lpFired = false;
+        var t = e.touches[0]; sx = t.clientX; sy = t.clientY;
+        lpTimer = setTimeout(function() {
+          lpFired = true;
+          try { if (navigator.vibrate) navigator.vibrate(18); } catch (e) {}
+          var id = card.getAttribute('data-appt-id');
+          if (id && typeof openChartFromAppt === 'function') openChartFromAppt(id);
+        }, 500);
+      }, { passive: true });
+      document.addEventListener('touchmove', function(e) {
+        if (!lpTimer) return;
+        var t = e.touches[0];
+        if (Math.abs(t.clientX - sx) > 10 || Math.abs(t.clientY - sy) > 10) { clearTimeout(lpTimer); lpTimer = null; }
+      }, { passive: true });
+      document.addEventListener('touchend', function() { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } });
+      // امنع فتح تفاصيل الموعد بعد الضغط الطويل
+      document.addEventListener('click', function(e) {
+        if (lpFired) { lpFired = false; if (e.target.closest && e.target.closest('[data-appt-id]')) { e.stopPropagation(); e.preventDefault(); } }
+      }, true);
+    })();
+    function renderHomeDayPanel(dateStr) {
+      const box = document.getElementById('homeDayAgenda'); if (!box) return;
+      const isPast  = parseLocalISODate(dateStr) < today;
+      const isToday = dateStr === todayStr;
+      document.getElementById('homePanelTitle').textContent = `${daysAr[parseLocalISODate(dateStr).getDay()]} — ${formatDateAr(dateStr)}`;
+
+      let recs;
+      if (isPast) {
+        recs = allRecords.filter(r => ['Accepted','Visited','NoShow','Cancelled','Rejected'].includes(r.Status) && normalizeDate(r.Date) === dateStr);
+        const vis = recs.filter(r=>r.Status==='Visited').length;
+        const ns  = recs.filter(r=>r.Status==='NoShow').length;
+        const canc= recs.filter(r=>['Cancelled','Rejected'].includes(r.Status)).length;
+        document.getElementById('homePanelCount').textContent = `زيارات: ${vis}${ns?' · لم يحضر: '+ns:''}${canc?' · ملغاة: '+canc:''}`;
+      } else if (isToday) {
+        // اليوم: تُعرض كل مواعيد اليوم (المؤكدة + التي تمّت + التي لم تحضر)
+        recs = allRecords.filter(r => ['Accepted','Visited','NoShow'].includes(r.Status) && normalizeDate(r.Date) === dateStr);
+        document.getElementById('homePanelCount').textContent = `عدد مواعيد اليوم: ${recs.length}`;
+      } else {
+        recs = allRecords.filter(r => r.Status === 'Accepted' && normalizeDate(r.Date) === dateStr);
+        document.getElementById('homePanelCount').textContent = `عدد المواعيد المؤكدة: ${recs.length}`;
+      }
+      // ترتيب من الأبكر للمتأخّر
+      recs = recs.slice().sort((a,b)=> slotMinutes(slotTimeOf(a)) - slotMinutes(slotTimeOf(b)));
+
+      if (!recs.length) {
+        box.innerHTML = '<div style="text-align:center;padding:22px 0;color:var(--text-muted);font-size:.85rem;"><i class="far fa-calendar-check" style="font-size:1.5rem;display:block;margin-bottom:8px;opacity:.4;"></i>لا توجد مواعيد في هذا اليوم</div>';
+        return;
+      }
+      // قائمة مسطّحة مرتّبة — الوقت داخل كل كرت
+      box.innerHTML = recs.map(homeApptCard).join('');
+    }
+
+    // تهيئة الروزنامة الرئيسية عند فتح الصفحة الرئيسية
+    document.getElementById('homePrevMonthBtn')?.addEventListener('click', () => {
+      homeCalDate.setMonth(homeCalDate.getMonth() - 1);
+      renderHomeCalendar();
+    });
+    document.getElementById('homeNextMonthBtn')?.addEventListener('click', () => {
+      homeCalDate.setMonth(homeCalDate.getMonth() + 1);
+      renderHomeCalendar();
+    });
+
+    // Hook into section changes
+    const _origSetActive = window.setActiveSection;
+    window.setActiveSection = function(section) {
+      if (_origSetActive) _origSetActive(section);
+      if (section === 'home') {
+        homeCalDate = new Date(currentDate);
+        selectedDayStr = todayStr;            // افتح دائماً على اليوم الحالي
+        renderHomeCalendar();
+        renderHomeDayPanel(todayStr);
+        var panel = document.getElementById('homeDayPanel');
+        if (panel) panel.style.display = 'flex';   // flex لا block: اللوحة عمود مرن كي تملأ الارتفاع المتبقّي
+      syncHomeColHeight();
+      }
+    };
+
+    // Initial render if home is default
+    setTimeout(() => {
+      renderHomeCalendar();
+      renderHomeWidgets();
+    }, 400);
+
+    // ==================== ويدجتس الصفحة الرئيسية الجديدة ====================
+    function renderHomeWidgets() {
+      if (!allRecords || allRecords.length === 0) return;
+
+      // --- توزيع الأيام (الأسبوع الحالي فقط) ---
+      const weekdayCounts = Array(7).fill(0);
+      // حساب بداية الأسبوع الحالي (الأحد)
+      const _wToday = new Date();
+      const _wStart = new Date(_wToday);
+      _wStart.setDate(_wToday.getDate() - _wToday.getDay());
+      _wStart.setHours(0,0,0,0);
+      const _wEnd = new Date(_wStart);
+      _wEnd.setDate(_wStart.getDate() + 6);
+      const _wStartStr = toLocalISODate(_wStart);
+      const _wEndStr   = toLocalISODate(_wEnd);
+      const _wSeen = {};
+      allRecords.forEach(r => {
+        if (!r.Date) return;
+        // مواعيد فعلية فقط (لا Pending/ملغاة) ومنع العدّ المضاعف للموعد نفسه
+        if (!['Accepted','Visited','NoShow'].includes(r.Status)) return;
+        const dateStr = normalizeDate(r.Date);
+        if (!dateStr || dateStr < _wStartStr || dateStr > _wEndStr) return;
+        const key = dateStr + '|' + slotTimeOf(r) + '|' + normalizePhone(r.Phone || '') + '|' + (r.PatientName || '');
+        if (_wSeen[key]) return; _wSeen[key] = 1;
+        const parts = dateStr.split('-').map(Number);
+        weekdayCounts[new Date(parts[0], parts[1]-1, parts[2]).getDay()]++;
+      });
+
+      const wWrap   = document.getElementById('homeWeekdayBarsWrap');
+      const wLabels = document.getElementById('homeWeekdayBarsLabels');
+      if (wWrap && wLabels) {
+        const dayNames = ['الأحد','الإثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+        const dayShort = ['أحد','إثنين','ثلاثاء','أربعاء','خميس','جمعة','سبت'];
+        const max      = Math.max(...weekdayCounts, 1);
+        const todayIdx = (new Date()).getDay();
+
+        // ── توزيع الأيام: خط متصاعد (نيون أخضر) بدل الأعمدة البيانية ──
+        const W = 300, H = 150;
+        const padX = 14, padTop = 26, padBot = 26;
+        const innerW = W - padX * 2, innerH = H - padTop - padBot;
+        const nPts = weekdayCounts.length;
+        // RTL: الأحد (i=0) على اليمين
+        const pts = weekdayCounts.map(function(v, i) {
+          const x = padX + ((nPts - 1 - i) / (nPts - 1)) * innerW;
+          const y = padTop + innerH - (v / max) * innerH;
+          return { x: x, y: y, v: v, i: i };
+        });
+        function _homeSmoothPath(p) {
+          if (!p.length) return '';
+          if (p.length === 1) return 'M ' + p[0].x + ' ' + p[0].y;
+          let d = 'M ' + p[0].x.toFixed(1) + ' ' + p[0].y.toFixed(1);
+          for (let i = 0; i < p.length - 1; i++) {
+            const p0 = p[i - 1] || p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] || p2;
+            const c1x = p1.x + (p2.x - p0.x) / 6, c1y = p1.y + (p2.y - p0.y) / 6;
+            const c2x = p2.x - (p3.x - p1.x) / 6, c2y = p2.y - (p3.y - p1.y) / 6;
+            d += ' C ' + c1x.toFixed(1) + ' ' + c1y.toFixed(1) + ', ' + c2x.toFixed(1) + ' ' + c2y.toFixed(1) + ', ' + p2.x.toFixed(1) + ' ' + p2.y.toFixed(1);
+          }
+          return d;
+        }
+        const linePath = _homeSmoothPath(pts);
+        const lastP = pts[pts.length - 1], firstP = pts[0];
+        const areaPath = linePath + ' L ' + lastP.x.toFixed(1) + ' ' + H + ' L ' + firstP.x.toFixed(1) + ' ' + H + ' Z';
+
+        // تأثير تصاعدي سريع وسلس: كشف الخط من اليمين إلى اليسار (clip wipe)
+        const animate = (window._dayChartAnimate === true);
+        window._dayChartAnimate = false;
+        const WIPE_DUR = 1.05; // ثوانٍ — سريع وسلس (أبطأ قليلاً)
+        const svgAnim = animate ? 'clip-path:inset(0 0 0 100%);animation:homeWipe ' + WIPE_DUR + 's cubic-bezier(.22,.61,.36,1) forwards;' : '';
+
+        wWrap.style.cssText = 'position:relative;width:100%;height:160px;direction:ltr;';
+        let _html = ''
+          + '<style>@keyframes homeWipe{to{clip-path:inset(0 0 0 0);}}@keyframes homeFadeIn{to{opacity:1;}}</style>'
+          + '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="100%" preserveAspectRatio="none" style="position:absolute;inset:0;overflow:visible;' + svgAnim + '">'
+          +   '<defs>'
+          +     '<filter id="homeLineGlow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur in="SourceGraphic" stdDeviation="3" result="b1"/><feGaussianBlur in="SourceGraphic" stdDeviation="7" result="b2"/><feMerge><feMergeNode in="b2"/><feMergeNode in="b1"/><feMergeNode in="SourceGraphic"/></feMerge></filter>'
+          +     '<linearGradient id="homeAreaFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" style="stop-color:var(--day-line);stop-opacity:.28"/><stop offset="60%" style="stop-color:var(--day-line);stop-opacity:.06"/><stop offset="100%" style="stop-color:var(--day-line);stop-opacity:0"/></linearGradient>'
+          +   '</defs>'
+          +   '<path d="' + areaPath + '" fill="url(#homeAreaFill)"></path>'
+          +   '<path d="' + linePath + '" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" filter="url(#homeLineGlow)" vector-effect="non-scaling-stroke" style="stroke:var(--day-line);"></path>'
+          +   '<path d="' + linePath + '" fill="none" stroke="#ffffff" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" vector-effect="non-scaling-stroke"></path>'
+          + '</svg>';
+        // النقاط + الأرقام (HTML لتبقى دائرية وحادّة) — تظهر تباعاً مع مرور الكشف من اليمين لليسار
+        _html += pts.map(function(p) {
+          const leftPct = (p.x / W) * 100, topPct = (p.y / H) * 100;
+          const isToday = (p.i === todayIdx);
+          const color = isToday ? 'var(--primary)' : 'var(--day-line)';
+          const size = isToday ? 12 : 8;
+          // تأخير الظهور = وقت وصول الكشف لهذا الموضع (يمين أولاً)
+          const fadeCss = animate ? 'opacity:0;animation:homeFadeIn .28s ease-out forwards;animation-delay:' + (((100 - leftPct) / 100) * WIPE_DUR).toFixed(2) + 's;' : '';
+          const numEl = '<div style="position:absolute;left:' + leftPct + '%;top:' + topPct + '%;transform:translate(-50%,-165%);font-size:.72rem;font-weight:800;color:' + (isToday ? 'var(--primary)' : 'var(--text-primary)') + ';white-space:nowrap;' + fadeCss + '">' + (p.v > 0 ? p.v : '') + '</div>';
+          const dotEl = '<div title="' + dayNames[p.i] + ': ' + p.v + ' موعد" style="position:absolute;left:' + leftPct + '%;top:' + topPct + '%;transform:translate(-50%,-50%);width:' + size + 'px;height:' + size + 'px;border-radius:50%;background:' + color + ';box-shadow:0 0 0 2px var(--surface),0 0 9px ' + color + ';' + fadeCss + '"></div>';
+          return numEl + dotEl;
+        }).join('');
+        // أسماء الأيام أسفل الرسم بنفس مواضع النقاط
+        _html += pts.map(function(p) {
+          const leftPct = (p.x / W) * 100;
+          const isToday = (p.i === todayIdx);
+          return '<div style="position:absolute;left:' + leftPct + '%;bottom:2px;transform:translateX(-50%);font-size:.66rem;font-weight:' + (isToday ? '800' : '600') + ';color:' + (isToday ? '#0d9488' : 'var(--text-muted)') + ';white-space:nowrap;' + (isToday ? 'background:var(--primary-light);padding:1px 7px;border-radius:6px;' : '') + '">' + dayShort[p.i] + '</div>';
+        }).join('');
+        wWrap.innerHTML = _html;
+        wLabels.style.display = 'none';
+      }
+
+      // --- أحدث 10 زيارات ---
+      const tbody = document.getElementById('homeRecentVisitsTable');
+      if (tbody) {
+        const visits = allRecords
+          .filter(r => r.Status === 'Visited' && r.Date)
+          .sort((a,b) => b.Date.localeCompare(a.Date))
+          .slice(0, 10);
+        if (visits.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;padding:16px 0;color:var(--text-muted);font-size:.82rem;">لا توجد زيارات</td></tr>';
+        } else {
+          tbody.innerHTML = visits.map((v,i) => `
+            <tr style="border-top:${i>0?'1px solid var(--border)':'none'};">
+              <td style="padding:7px 0;font-weight:700;color:var(--text-primary);font-size:.8rem;">${v.PatientName||'-'}</td>
+              <td style="padding:7px 4px;color:var(--text-muted);font-size:.75rem;">${v.VisitType||'-'}</td>
+              <td style="padding:7px 0;color:var(--primary);font-size:.75rem;font-weight:600;white-space:nowrap;">${formatDateAr(v.Date)}</td>
+            </tr>`).join('');
+        }
+      }
+    }
+
+    // تحديث الويدجتس عند تحميل البيانات
+    const _origRenderStats = typeof renderStats === 'function' ? renderStats : null;
+    window.addEventListener('recordsUpdated', () => { renderHomeWidgets(); renderHomeCalendar(); });
+
+
+
+    // ===== فتح الإضبارة =====
+    // فتح إضبارة المريض من بطاقة الموعد (كليك يمين على الجدول)
+    // لا تُنشَأ إضبارة جديدة هنا: إن لم توجد إضبارة (أوّل موعد للمريض) تظهر رسالة فقط —
+    // الإضبارة تُنشأ عند تسجيل حضوره من الممرّضة.
+    var _apptdCurrentId = null;   // الموعد المعروض في مودال التفاصيل
+
+    /* زرّ «فتح الإضبارة» داخل مودال التفاصيل — بديل الكليك اليمين على الهاتف.
+       يُغلق المودال أولاً كي لا تُفتح الإضبارة خلفه. */
+    window.openChartFromApptModal = function() {
+      var id = _apptdCurrentId;
+      if (!id) return;
+      if (typeof closeAppointmentDetailsModal === 'function') closeAppointmentDetailsModal();
+      openChartFromAppt(id);
+    };
+
+    window.openChartFromAppt = function(apptId) {
+      var r = (allRecords || []).find(function(x) { return x.id === apptId; });
+      if (!r) { showToast('الموعد غير موجود', 'error'); return; }
+      // الإشارة الموثوقة الوحيدة لهوية المريض: linkedPatientId — يُضبط فقط عند تسجيل حضور
+      // هذا المريض تحديداً (الممرّضة) أو في البذر المربوط. لا نطابق بالهاتف: أرقام مشتركة/عائلية
+      // كانت تفتح إضبارة شخص آخر. فبدون linkedPatientId ⇒ المريض لم يُسجَّل بعد ⇒ رسالة فقط.
+      if (r.linkedPatientId) {
+        if (allPatients[r.linkedPatientId]) openPatientDetailsModal(r.linkedPatientId);
+        else _openServedPatient(r.linkedPatientId, r.PatientName);
+        return;
+      }
+      _noChartMsg(r);
+    };
+    // لا إضبارة لهذا المريض — أوّل موعد له
+    function _noChartMsg(r) {
+      showToast('«' + ((r && r.PatientName) || 'هذا المريض') + '» لا يمتلك إضبارة بعد — هذا أوّل موعد له؛ تُنشأ إضبارته عند تسجيل حضوره', 'info');
+    }
+
+
+    // فتح إضبارة المريض الذي أرسلته الممرّضة (يجلبه من Firestore إن لم يكن محمّلاً)
+    function _openServedPatient(pid, name) {
+      if (!pid) return;
+      if (allPatients[pid]) { openPatientDetailsModal(pid); return; }
+      window._fb.getDoc('patients', pid).then(function(s) {
+        if (s.exists()) { allPatients[pid] = Object.assign({ id: pid }, s.data()); openPatientDetailsModal(pid); }
+        else { showToast('تعذّر فتح إضبارة ' + (name || 'المريض'), 'error'); }
+      }).catch(function(e){ console.error(e); });
+    }
+    // إشعار «المريض التالي جاهز» — يبقى حتى يفتح الطبيب الإضبارة أو يضغط «إخفاء»
+    var _nextPatientNotifEl = null;
+    function showNextPatientNotif(pid, name) {
+      if (_nextPatientNotifEl && _nextPatientNotifEl.parentNode) _nextPatientNotifEl.parentNode.removeChild(_nextPatientNotifEl);
+      var el = document.createElement('div');
+      el.className = 'next-patient-notif';
+      el.innerHTML =
+          '<div class="npn-body"><span class="npn-ic"><i class="fas fa-user-check"></i></span>'
+        + '<div class="npn-txt"><div class="npn-title">تم حضور المريض</div><div class="npn-name">' + escapeHtml(name || 'مريض') + '</div></div></div>'
+        + '<div class="npn-actions"><button type="button" class="npn-open"><i class="fas fa-folder-open"></i> فتح الإضبارة</button>'
+        + '<button type="button" class="npn-dismiss">إخفاء</button></div>';
+      _getDocNotifContainer().appendChild(el);
+      _nextPatientNotifEl = el;
+      requestAnimationFrame(function(){ requestAnimationFrame(function(){ el.classList.add('show'); }); });
+      function remove() { el.classList.remove('show'); setTimeout(function(){ if (el.parentNode) el.parentNode.removeChild(el); if (_nextPatientNotifEl === el) _nextPatientNotifEl = null; }, 260); }
+      el.querySelector('.npn-open').onclick = function(){ remove(); _openServedPatient(pid, name); };
+      el.querySelector('.npn-dismiss').onclick = remove;
+      try { if (typeof playDocNotifSound === 'function') playDocNotifSound(); } catch(e){}
+    }
+
+    // 🦷 هل تخصص الأسنان مُفعَّل؟ (اختصاص أسنان أو قالب الأسنان مطبّق)
+    function _dentalEnabled() {
+      var sp = (typeof settings !== 'undefined' && settings && settings.specialty) || '';
+      return /أسنان|اسنان|dental/i.test(sp) || !!(settings && settings.chartTemplate && settings.chartTemplate.dental);
+    }
+    window.openPatientDetailsModal = function(pid) {
+      var p = allPatients[pid]; if (!p) return;
+      currentPatientIdForVisit = pid;
+      document.getElementById('modalPatientName').textContent = p.name || '-';
+      document.getElementById('modalPatientPhone').textContent = p.phone || '';
+      document.getElementById('modalWhatsappBtn').href = 'https://wa.me/' + normalizePhone(p.phone || '');
+      document.getElementById('modalCallBtn').href = 'tel:' + normalizePhone(p.phone || '');
+      document.getElementById('chartAvatar').textContent = ((p.name || '؟').trim().charAt(0)) || '؟';
+      // شارات الحساسية/المزمن أُزيلت من الهيدر — تبقى في معلومات المريض الثابتة أسفله
+      var _pills = document.getElementById('chartHeaderPills'); if (_pills) { _pills.innerHTML = ''; _pills.style.display = 'none'; }
+      document.getElementById('chartInfoGrid').innerHTML = renderChartInfoTiles(p);
+      renderChartVisits(pid);
+      // ★ زر الأداة السريرية في رأس الأرشيف: يظهر فقط إن وُجد حقل بزيارتين فأكثر فيهما قيم (يفتح مودال openSpecialtyTool)
+      var _sbtn = document.getElementById('specialtyToolBtn');
+      if (_sbtn) _sbtn.style.display = (typeof _scBuildBody === 'function' && _scBuildBody(pid)) ? 'flex' : 'none';
+      // 🦷 عنصر مخطط الأسنان في القائمة: يظهر عند تفعيل الأسنان
+      var _dbtn = document.getElementById('dentalArchiveBtn');
+      if (_dbtn) _dbtn.style.display = _dentalEnabled() ? 'flex' : 'none';
+      // 🩺 عنصر العمليات الجراحية: يظهر عند تفعيل الميزة، مع شارة المتأخّرة
+      if (typeof _surgeryUpdateBadge === 'function') _surgeryUpdateBadge(pid);
+      // 🦷 عنصر تقويم الأسنان: يظهر لتخصّص الأسنان، مع شارة الدورات النشطة
+      if (typeof _orthoUpdateBadge === 'function') _orthoUpdateBadge(pid);
+      if (typeof _pfSyncSectionsMenu === 'function') _pfSyncSectionsMenu();   // أظهر السهم إن توفّر قسم
+      if (typeof chartResetBooking === 'function') chartResetBooking(pid);
+      document.getElementById('patientDetailsModal').classList.remove('hidden');
+      var _rail = document.getElementById('mainRail'); if (_rail) _rail.style.display = 'none';   // إخفاء السايدبار أثناء فتح الإضبارة
+    };
+
+    // ── قائمة أقسام المريض المنسدلة (تُفتح بالسهم جنب الاسم) ──
+    window.togglePfSections = function(e) {
+      if (e) { e.stopPropagation(); e.preventDefault(); }
+      var panel = document.getElementById('pfSectionsPanel');
+      var btn = document.getElementById('pfSectionsBtn');
+      if (!panel || !btn) return;
+      if (panel.hasAttribute('hidden')) {
+        var nm = document.getElementById('modalPatientName');
+        var ph = document.getElementById('modalPatientPhone');
+        var av = document.getElementById('chartAvatar');
+        var mN = document.getElementById('pfMenuName'); if (mN && nm) mN.textContent = nm.textContent;
+        var mP = document.getElementById('pfMenuPhone'); if (mP && ph) mP.textContent = ph.textContent;
+        var mA = document.getElementById('pfMenuAvatar'); if (mA && av) mA.textContent = (av.textContent || '؟').trim() || '؟';
+        panel.removeAttribute('hidden'); btn.setAttribute('aria-expanded', 'true');
+      } else {
+        panel.setAttribute('hidden', ''); btn.setAttribute('aria-expanded', 'false');
+      }
+    };
+    window.closePfSections = function() {
+      var panel = document.getElementById('pfSectionsPanel'), btn = document.getElementById('pfSectionsBtn');
+      if (panel && !panel.hasAttribute('hidden')) { panel.setAttribute('hidden', ''); if (btn) btn.setAttribute('aria-expanded', 'false'); }
+    };
+    window.pfSectionGo = function(fnName) {
+      closePfSections();
+      if (typeof window[fnName] === 'function') window[fnName](currentPatientIdForVisit);
+    };
+    // ينقل صفّ الأقسام: داخل شريط الجزيرة على اللابتوب/التابلت (≥768) وصفّ واحد،
+    // أو تحت الجزيرة على الهاتف (<768).
+    window._pfPlaceSectionsRow = function() {
+      var menu = document.getElementById('pfSectionsMenu'); if (!menu) return;
+      var head = document.querySelector('#patientDetailsModal .pf-head');
+      var hero = document.querySelector('#patientDetailsModal .pf-hero');
+      var acts = document.querySelector('#patientDetailsModal .pf-head-actions');
+      var pills = document.getElementById('chartHeaderPills');
+      if (!head || !hero) return;
+      var wide = window.matchMedia('(min-width:768px)').matches;
+      if (wide) {
+        if (menu.parentElement !== head) head.insertBefore(menu, acts || null);
+      } else {
+        if (menu.parentElement !== hero) hero.insertBefore(menu, pills || null);
+      }
+    };
+    // يُظهر صفّ الأقسام فقط إن توفّر قسم واحد على الأقل
+    window._pfSyncSectionsMenu = function() {
+      var menu = document.getElementById('pfSectionsMenu'); if (!menu) return;
+      var any = ['specialtyToolBtn', 'dentalArchiveBtn', 'orthoArchiveBtn', 'surgeryArchiveBtn'].some(function(id) {
+        var el = document.getElementById(id); return el && el.style.display !== 'none';
+      });
+      menu.style.display = any ? 'flex' : 'none';
+      _pfPlaceSectionsRow();
+      if (!any) closePfSections();
+    };
+    // إعادة التموضع عند تغيّر عرض الشاشة (لابتوب ⇄ هاتف)
+    try { window.matchMedia('(min-width:768px)').addEventListener('change', _pfPlaceSectionsRow); }
+    catch (e) { window.addEventListener('resize', _pfPlaceSectionsRow); }
+    // إغلاق القائمة بالنقر خارجها أو بمفتاح Esc
+    document.addEventListener('click', function(e) {
+      var menu = document.getElementById('pfSectionsMenu');
+      if (menu && !menu.contains(e.target)) closePfSections();
+    });
+    document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closePfSections(); });
+
+    function _visitSection(title, icon, text) {
+      text = (text || '').trim();
+      return '<div style="margin-top:12px;"><div style="font-size:.76rem;font-weight:800;color:var(--primary);margin-bottom:5px;"><i class="fas ' + icon + '" style="margin-left:5px;"></i>' + title + '</div>'
+        + '<div style="font-size:.84rem;color:var(--text-primary);line-height:1.7;white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;">'
+        + (text ? escapeHtml(text) : '<span style="color:var(--text-muted)">— لا يوجد —</span>') + '</div></div>';
+    }
+    /* عنوان صفّ الزيارة: التشخيص أولاً — لا «كشف جديد» المتكرّرة.
+       كانت كل الزيارات تظهر بعنوان واحد فلا يميّزها إلا التاريخ، والطبيب
+       يفتحها واحدة واحدة ليجد ما يبحث عنه. التشخيص يجعل الأرشيف يُقرأ بالعين.
+       سلسلة الاحتياط: تشخيص ← شكوى ← نوع الزيارة. وسطر واحد فقط. */
+    function _visitHeadline(v) {
+      var t = (v.diagnosis || v.note || '').trim() || (v.complaint || '').trim();
+      if (!t) return escapeHtml(v.visitType || 'زيارة');
+      t = t.split(/\r?\n/)[0].trim();              // أول سطر فقط
+      if (t.length > 70) t = t.slice(0, 70) + '…';
+      return escapeHtml(t);
+    }
+
+    // محتوى تفاصيل الزيارة (يُعرَض في مودال منفصل عند فتح كرت الفولدر)
+    function renderVisitBodyHtml(v, pid, i) {
+      var hasLab = !!(v.labTest && v.labTest.trim());
+      var hasImg = !!(v.imagingTest && v.imagingTest.trim());
+      return ((v.complaint && v.complaint.trim()) ? _visitSection('الشكوى', 'fa-comment-medical', v.complaint) : '')
+        + renderVisitCustomHtml(v.custom)
+        + ((v.clinicalExam && v.clinicalExam.trim()) ? _visitSection('الفحص السريري', 'fa-stethoscope', v.clinicalExam) : '')
+        + _visitSection('التشخيص', 'fa-notes-medical', v.diagnosis || v.note)
+        + _visitSection('الوصفة الطبية', 'fa-prescription', v.prescription)
+        + (hasLab ? _visitSection('التحاليل المطلوبة', 'fa-vials', v.labTest) : '')
+        + (hasImg ? _visitSection('الأشعة المطلوبة', 'fa-x-ray', v.imagingTest) : '')
+        + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;">'
+          + '<button onclick="openAddNoteModal(\'' + pid + '\',' + i + ')" class="pf-editbtn" style="padding:6px 12px;"><i class="fas fa-pen"></i> تعديل</button>'
+          + '<button onclick="deleteVisit(\'' + pid + '\',' + i + ');closeVisitDetail();" style="padding:6px 12px;font-size:.76rem;background:#fef2f2;color:#dc2626;border:1px solid #fecaca;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;"><i class="fas fa-trash"></i> حذف الزيارة</button>'
+          + '<button onclick="printPrescription(\'' + pid + '\',' + i + ')" style="padding:6px 12px;font-size:.76rem;background:var(--primary-light);color:var(--primary);border:1px solid var(--border-strong);border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;"><i class="fas fa-print"></i> طباعة الوصفة</button>'
+          + '<button onclick="sendVisitToContact(\'' + pid + '\',' + i + ',\'pharmacy\')" style="padding:6px 12px;font-size:.76rem;background:#16a34a;color:#fff;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;"><i class="fab fa-whatsapp"></i> صيدلية</button>'
+          + (hasLab ? '<button onclick="sendVisitToContact(\'' + pid + '\',' + i + ',\'lab\')" style="padding:6px 12px;font-size:.76rem;background:#2563eb;color:#fff;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;"><i class="fab fa-whatsapp"></i> مخبر</button>' : '')
+          + (hasImg ? '<button onclick="sendVisitToContact(\'' + pid + '\',' + i + ',\'imaging\')" style="padding:6px 12px;font-size:.76rem;background:#7c3aed;color:#fff;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-weight:700;"><i class="fab fa-whatsapp"></i> مركز أشعة</button>' : '')
+        + '</div>';
+    }
+
+    window.openVisitDetail = function(pid, i) {
+      var p = allPatients[pid]; if (!p || !p.appointments || !p.appointments[i]) return;
+      var v = p.appointments[i];
+      window._visitDetailCtx = { pid: pid, i: i };
+      document.getElementById('visitDetailTitle').textContent = _visitHeadline(v);
+      document.getElementById('visitDetailMeta').textContent = formatDateAr(v.date) + ' · ' + slotTimeOf(v) + ' · ' + (v.visitType || 'زيارة');
+      document.getElementById('visitDetailBody').innerHTML = renderVisitBodyHtml(v, pid, i);
+      document.getElementById('visitDetailModal').classList.remove('hidden');
+    };
+    window.closeVisitDetail = function() {
+      var m = document.getElementById('visitDetailModal'); if (m) m.classList.add('hidden');
+    };
+
+    function renderChartVisits(pid) {
+      var p = allPatients[pid]; var box = document.getElementById('chartVisitsList');
+      var visits = (p.appointments || []).map(function(v, i) { return { v: v, i: i }; });
+      visits.sort(function(a, b) { var d = (b.v.date || '').localeCompare(a.v.date || ''); return d !== 0 ? d : (slotMinutes(slotTimeOf(b.v)) - slotMinutes(slotTimeOf(a.v))); });
+      document.getElementById('chartVisitsCount').textContent = '(' + visits.length + ')';
+      if (!visits.length) { box.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:24px;color:var(--text-muted);font-size:.85rem;"><i class="far fa-folder-open" style="font-size:1.6rem;display:block;margin-bottom:8px;opacity:.4;"></i>لا توجد زيارات بعد</div>'; return; }
+      box.innerHTML = visits.map(function(o) {
+        var v = o.v, i = o.i, c = schedStatusColor(v);
+        return '<button class="visit-folder" style="--vf-accent:' + c.bd + ';" onclick="openVisitDetail(\'' + pid + '\',' + i + ')" oncontextmenu="event.preventDefault();openAddNoteModal(\'' + pid + '\',' + i + ');return false;" title="كليك يمين: تعديل سريع">'
+          + '<span class="vf-inner">'
+          +   '<span class="vf-back"></span>'
+          +   '<span class="vf-paper"></span>'
+          +   '<span class="vf-front">'
+          +     '<span class="vf-title">' + _visitHeadline(v) + '</span>'
+          +     '<span class="vf-meta">' + formatDateAr(v.date) + '</span>'
+          +     '<span class="vf-type">' + escapeHtml(v.visitType || 'زيارة') + '</span>'
+          +   '</span>'
+          + '</span>'
+          + '</button>';
+      }).join('');
+    }
+
+    // ===== حذف زيارة (خيار الطبيب) =====
+    window.deleteVisit = function(pid, idx) {
+      var p = allPatients[pid]; if (!p || !p.appointments || !p.appointments[idx]) return;
+      var v = p.appointments[idx];
+      if (!confirm('حذف هذه الزيارة نهائياً؟\n' + (v.visitType || 'زيارة') + ' — ' + formatDateAr(v.date) + '\nلا يمكن التراجع عن هذا الإجراء.')) return;
+      p.appointments.splice(idx, 1);
+      if (typeof p.totalVisits === 'number') p.totalVisits = Math.max(0, p.totalVisits - 1);
+      window._fb.setDoc(window._fb.docRef('patients', pid), p, { merge: true })
+        .then(function(){ showToast('تم حذف الزيارة', 'success'); })
+        .catch(function(e){ showToast('فشل حذف الزيارة', 'error'); console.error(e); });
+      renderChartVisits(pid);
+    };
+
+    // ===== حجز الموعد القادم من الإضبارة (خيار الطبيب) =====
+    var _chartBookData = null;
+    function _cbcRow(icon, label, valId) {
+      return '<div style="display:flex;align-items:center;justify-content:space-between;background:var(--surface);border:1.5px solid var(--border);border-radius:10px;padding:10px 13px;">'
+        + '<span style="font-size:.78rem;font-weight:700;color:var(--text-secondary);"><i class="fas ' + icon + '" style="color:var(--primary);margin-left:6px;"></i>' + label + '</span>'
+        + '<span id="' + valId + '" style="font-size:.84rem;font-weight:800;color:var(--text-primary);"></span></div>';
+    }
+    function chartEnsureBookModal() {
+      if (document.getElementById('chartBookConfirmModal')) return;
+      var m = document.createElement('div');
+      m.id = 'chartBookConfirmModal';
+      m.className = 'hidden fixed inset-0 z-[210] modal-overlay';
+      m.setAttribute('onclick', 'if(event.target===this)closeChartBookConfirm()');
+      m.innerHTML =
+        '<div class="modal-content" style="max-width:400px;width:92%;border-radius:18px;overflow:hidden;">'
+        + '<div style="display:flex;align-items:center;gap:11px;padding:15px 18px;background:linear-gradient(135deg,var(--primary),var(--primary-7,#0f766e));color:#fff;">'
+        +   '<span style="width:40px;height:40px;border-radius:11px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-size:1.15rem;"><i class="far fa-calendar-check"></i></span>'
+        +   '<div><h3 style="font-weight:900;font-size:1rem;">تأكيد حجز الموعد</h3><p style="font-size:.72rem;opacity:.9;">راجع التفاصيل قبل التأكيد</p></div>'
+        + '</div>'
+        + '<div style="padding:18px;background:var(--bg);display:flex;flex-direction:column;gap:10px;">'
+        +   _cbcRow('fa-user','المريض','cbcName') + _cbcRow('fa-calendar','التاريخ','cbcDate') + _cbcRow('fa-clock','الساعة','cbcSlot')
+        +   '<div style="font-size:.74rem;color:var(--text-muted);text-align:center;margin-top:2px;">سيُضاف الموعد للتقويم والجدول ويُشعَر الطاقم</div>'
+        + '</div>'
+        + '<div style="display:flex;gap:10px;padding:14px 18px;border-top:1.5px solid var(--border);background:var(--surface);">'
+        +   '<button onclick="closeChartBookConfirm()" class="btn-secondary" style="flex:1;justify-content:center;">إلغاء</button>'
+        +   '<button id="cbcConfirmBtn" onclick="chartConfirmBooking()" class="btn-primary" style="flex:2;justify-content:center;"><i class="fas fa-check"></i> تأكيد الحجز</button>'
+        + '</div></div>';
+      document.body.appendChild(m);
+    }
+    function chartResetBooking(pid) {
+      chartEnsureBookModal();
+      var de = document.getElementById('chartNextDate');
+      if (de) { de.min = todayStr; de.value = ''; }
+      var hint = document.getElementById('chartNextHint'); if (hint) hint.textContent = '';
+      var sel = document.getElementById('chartNextSlot'); if (sel) sel.innerHTML = '<option value="">اختر التاريخ أولاً</option>';
+    }
+    function chartFillNextSlots() {
+      var sel = document.getElementById('chartNextSlot'); if (!sel) return;
+      var date = (document.getElementById('chartNextDate') || {}).value || '';
+      var hint = document.getElementById('chartNextHint');
+      if (!date) { sel.innerHTML = '<option value="">اختر التاريخ أولاً</option>'; if (hint) hint.textContent=''; return; }
+      if (typeof isDayClosed === 'function' && isDayClosed(date)) {
+        sel.innerHTML = '<option value="">—</option>';
+        if (hint) hint.innerHTML = '<span style="color:#dc2626;font-weight:700;">هذا اليوم مغلق للحجز</span>'; return;
+      }
+      var taken = (typeof docTakenHoursForDate === 'function') ? docTakenHoursForDate(date) : {};
+      var slots = (typeof docSlots === 'function') ? docSlots() : [];
+      // أغلق ساعات اليوم الماضية بحسب التوقيت المحلّي الحالي
+      var isToday = (date === todayStr), nowHM = '';
+      if (isToday) { var _n = new Date(); nowHM = String(_n.getHours()).padStart(2, '0') + ':' + String(_n.getMinutes()).padStart(2, '0'); }
+      var avail = 0, frag = '';
+      slots.forEach(function(s){ if (taken[s]) return; if (isToday && s <= nowHM) return; frag += '<option value="' + s + '">' + ((typeof docFmtHour12==='function')?docFmtHour12(s):s) + '</option>'; avail++; });
+      if (!avail) { sel.innerHTML = '<option value="">لا ساعات متاحة</option>'; if (hint) hint.innerHTML = '<span style="color:#d97706;font-weight:700;">كل ساعات هذا اليوم محجوزة</span>'; }
+      else { sel.innerHTML = frag; if (hint) hint.textContent = avail + ' ساعة متاحة'; }
+    }
+    window.chartNextDateChanged = function(){ chartFillNextSlots(); };
+    window.chartBookNext = function() {
+      var pid = currentPatientIdForVisit, p = allPatients[pid];
+      if (!p) { showToast('لا يوجد مريض محدّد', 'error'); return; }
+      var date = (document.getElementById('chartNextDate') || {}).value;
+      var slot = (document.getElementById('chartNextSlot') || {}).value;
+      if (!date) { showToast('اختر تاريخ الموعد', 'error'); return; }
+      if (typeof isDayClosed === 'function' && isDayClosed(date)) { showToast('هذا اليوم مغلق للحجز', 'error'); return; }
+      if (!slot) { showToast('اختر ساعة متاحة', 'error'); return; }
+      _chartBookData = { pid: pid, date: date, slot: slot };
+      chartEnsureBookModal();
+      document.getElementById('cbcName').textContent = p.name || p.PatientName || '—';
+      document.getElementById('cbcDate').textContent = formatDateAr(date);
+      document.getElementById('cbcSlot').textContent = (typeof docFmtHour12==='function')?docFmtHour12(slot):slot;
+      document.getElementById('chartBookConfirmModal').classList.remove('hidden');
+    };
+    window.closeChartBookConfirm = function(){ var m = document.getElementById('chartBookConfirmModal'); if (m) m.classList.add('hidden'); };
+    window.chartConfirmBooking = function() {
+      if (!_chartBookData) return;
+      var pid = _chartBookData.pid, date = _chartBookData.date, slot = _chartBookData.slot, p = allPatients[pid];
+      if (!p) return;
+      if (typeof docTakenHoursForDate === 'function' && docTakenHoursForDate(date)[slot]) {
+        showToast('هذه الساعة لم تعد متاحة، اختر غيرها', 'error'); closeChartBookConfirm(); chartFillNextSlots(); return;
+      }
+      var btn = document.getElementById('cbcConfirmBtn');
+      function _reset(){ if (btn){ btn.disabled=false; btn.innerHTML='<i class="fas fa-check"></i> تأكيد الحجز'; } }
+      if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الحجز...'; }
+      var appointment = {
+        PatientName: p.name || p.PatientName || '', Phone: p.phone || p.Phone || '',
+        BirthDate: p.birthDate || p.BirthDate || '', Address: p.address || p.Address || '',
+        VisitType: 'مراجعة', Date: date, Slot: slot, Status: 'Accepted',
+        createdAt: new Date().toISOString(), source: 'chart', patientId: pid
+      };
+      window._fb.addDoc(window._fb.col('appointments'), appointment)
+        .then(function(apptRef) {
+          try { var lockId = docSlotLockId(date, slot);
+            window._fb.setDoc(window._fb.docRef('bookedSlots', lockId), { date: date, time: slot, apptId: apptRef.id, status: 'booked', source: 'chart', createdAt: window._fb.serverTimestamp() }).catch(function(){});
+          } catch (e) {}
+          try {
+            window._fb.addDoc(window._fb.col('alerts'), { type:'newManualAppt', direction:'doctorToNurse', message:'موعد مراجعة: ' + (p.name || p.PatientName || ''), read:false, createdAt: window._fb.serverTimestamp(), expireAt: new Date(Date.now() + 30*24*60*60*1000) })
+              .then(function(alertRef){ try { new BroadcastChannel('nurseAlerts').postMessage({ type:'newManualAppt', direction:'doctorToNurse', message:'موعد مراجعة: ' + (p.name||''), ts: Date.now(), docId: alertRef.id }); } catch(e){} }).catch(function(){});
+          } catch (e) {}
+          closeChartBookConfirm(); _reset();
+          showToast('تم حجز الموعد بنجاح ✓', 'success');
+          var de = document.getElementById('chartNextDate'); if (de) de.value = '';
+          chartFillNextSlots(); _chartBookData = null;
+        })
+        .catch(function(e){ showToast('فشل الحجز: ' + (e.code || e.message), 'error'); console.error(e); _reset(); });
+    };
+
+    // ===== إضافة زيارة جديدة يدوياً =====
+    /* ── حارس حجم مستند المريض ──
+       كل زيارات المريض في مستند واحد، وحدّ Firestore ١ ميغابايت. عند بلوغه يفشل
+       الحفظ كلياً بلا رسالة مفهومة. نحذّر قبل ذلك بوقت كافٍ.
+       TextEncoder لا String.length: النصّ العربي حرفان بايت في UTF-8 فيُقاس نصفه خطأً. */
+    var DOC_LIMIT = 1048576;
+    var _sizeWarned = {};
+    function _docSizeBytes(o) {
+      try { return new TextEncoder().encode(JSON.stringify(o)).length; } catch (e) { return 0; }
+    }
+    // يُرجع وعداً بـ true للمتابعة، false للإلغاء
+    function _guardDocSize(pid, p) {
+      var pct = Math.round(_docSizeBytes(p) / DOC_LIMIT * 100);
+      if (pct >= 95) {
+        return appConfirm('ملف هذا المريض امتلأ ' + pct + '٪ من الحدّ الأقصى.\n' +
+          'قد يتوقّف حفظ الزيارات قريباً. تواصل مع الدعم الفنّي.\n\nهل تريد المتابعة؟', 'متابعة');
+      }
+      if (pct >= 75 && !_sizeWarned[pid]) {
+        _sizeWarned[pid] = 1;   // مرّة واحدة لكل مريض في الجلسة — بلا إزعاج متكرّر
+        showToast('تنبيه: ملف هذا المريض امتلأ ' + pct + '٪ — يُنصح بمراجعة الدعم', 'error');
+      }
+      return Promise.resolve(true);
+    }
+
+    window.addNewVisit = function(pid) {
+      var p = allPatients[pid]; if (!p) return;
+      if (!p.appointments) p.appointments = [];
+      var now = new Date(); var hh = String(now.getHours()).padStart(2, '0'); var mm = String(now.getMinutes()).padStart(2, '0');
+      p.appointments.push({ date: todayStr, slot: hh + ':' + mm, visitType: 'كشف جديد', diagnosis: '', prescription: '', labTest: '', noteUpdatedAt: Date.now(), source: 'chart' });
+      p.totalVisits = (p.totalVisits || 0) + 1;
+      // كانت الممرّضة وحدها تكتب هذين، فزيارات الاضبارة لا تُحدّث «آخر زيارة»
+      // — يُفسد عدّاد المرضى النشطين وأي ترتيب زمني.
+      p.lastVisit = todayStr;
+      if (!p.firstVisit) p.firstVisit = todayStr;
+      _guardDocSize(pid, p).then(function(go) {
+        if (!go) { p.appointments.pop(); p.totalVisits = Math.max(0, (p.totalVisits || 1) - 1); return; }
+        window._fb.setDoc(window._fb.docRef('patients', pid), p, { merge: true })
+          // مريض خارج الأربعين المحمَّلة لا يُطلق مستمع الصفحة — نحدّث الأرقام صراحةً
+          .then(function() { if (typeof _refreshServerStats === 'function') _refreshServerStats(); })
+          .catch(function(e){ console.error(e); });
+        openAddNoteModal(pid, p.appointments.length - 1);
+      });
+    };
+
+    /* ── شريط الخطر فوق المحرّر ──
+       الحساسية أخطر معلومة قبل كتابة وصفة، وكانت مدفونة في بطاقة جانبية.
+       تُقرأ من الحقول المخصّصة الموسومة حساسية (_cfIsAllergy) ومن الأمراض المزمنة. */
+    function _veRenderDanger(p) {
+      var bar = document.getElementById('veDangerBar'); if (!bar) return;
+      var custom = (p && p.custom) || {}, parts = [];
+      try {
+        getChartTemplate().patient.filter(_cfIsAllergy).forEach(function(f) {
+          var d = _cfDisplayVal(f, custom[f.id]);
+          if (d !== '') parts.push('<span>' + escapeHtml(f.label) + ': ' + escapeHtml(d) + '</span>');
+        });
+      } catch (e) {}
+      var chronic = (p && p.chronicDiseases || '').trim();
+      if (chronic) parts.push('<em>· مزمن: ' + escapeHtml(chronic) + '</em>');
+      if (!parts.length) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+      bar.innerHTML = '<span class="tag">تنبيه</span>' + parts.join(' ');
+      bar.style.display = 'flex';
+    }
+
+    /* ── بطاقة الزيارة السابقة ──
+       الطبيب كان يكتب في فراغ: لا يرى ما شخّصه أو وصفه آخر مرّة إلا بإغلاق المحرّر.
+       «نسخ الوصفة» يختصر أكثر إجراء متكرّر في المراجعات. */
+    function _veRenderPrevVisit(p, idx) {
+      var card = document.getElementById('prevVisitCard');
+      var body = document.getElementById('prevVisitBody');
+      var when = document.getElementById('prevVisitWhen');
+      if (!card || !body) return;
+      card.classList.toggle('collapsed', !!_vePrevCollapsed);   // استعادة تفضيل الطيّ
+      var visits = (p && p.appointments) || [];
+      // الأحدث قبل الزيارة الحالية زمنياً (لا بالفهرس — الترتيب في المصفوفة ليس زمنياً بالضرورة)
+      var cur = visits[idx], prev = null;
+      visits.forEach(function(v, i) {
+        if (i === idx || !v || !v.date) return;
+        if (cur && cur.date && v.date > cur.date) return;
+        if (cur && cur.date && v.date === cur.date && i > idx) return;
+        if (!prev || (v.date > prev.date)) prev = v;
+      });
+      if (!prev) {
+        card.style.display = '';
+        when.textContent = '';
+        body.innerHTML = '<div class="ve-prev-empty">هذه أول زيارة لهذا المريض.</div>';
+        return;
+      }
+      function fld(k, val, isRx) {
+        if (!val || !String(val).trim()) return '';
+        return '<div class="ve-prev-f"><div class="k">' + k + '</div>'
+          + '<div class="v' + (isRx ? ' rx' : '') + '">' + escapeHtml(String(val).trim()) + '</div></div>';
+      }
+      var days = '';
+      try {
+        var d1 = parseLocalISODate(prev.date), d2 = new Date(); d2.setHours(0,0,0,0);
+        var n = Math.round((d2 - d1) / 86400000);
+        days = n > 0 ? ' · قبل ' + n + ' يوم' : '';
+      } catch (e) {}
+      when.textContent = formatDateAr(prev.date) + days;
+      var inner = fld('الشكوى', prev.complaint) + fld('التشخيص', prev.diagnosis || prev.note)
+                + fld('الوصفة', prev.prescription, true);
+      if (!inner) inner = '<div class="ve-prev-empty">الزيارة السابقة بلا تفاصيل مسجّلة.</div>';
+      if (prev.prescription && prev.prescription.trim()) {
+        inner += '<button class="ve-copy" type="button" onclick="veCopyPrevRx()">نسخ الوصفة إلى الزيارة</button>';
+        card.setAttribute('data-rx', prev.prescription);
+      } else {
+        card.removeAttribute('data-rx');
+      }
+      body.innerHTML = inner;
+      card.style.display = '';
+    }
+
+    window.veCopyPrevRx = function() {
+      var card = document.getElementById('prevVisitCard');
+      var rx = card && card.getAttribute('data-rx');
+      var box = document.getElementById('prescriptionText');
+      if (!rx || !box) return;
+      box.value = rx;
+      veAutoGrow(box);   // القيمة وُضعت برمجياً فلا حدث input يوسّع الحقل
+      _veSyncSteps();
+      var btn = card.querySelector('.ve-copy');
+      if (btn) {
+        btn.textContent = 'تم النسخ'; btn.classList.add('done');   // الأيقونة (✓) من ::before
+        setTimeout(function() { btn.textContent = 'نسخ الوصفة إلى الزيارة'; btn.classList.remove('done'); }, 1800);
+      }
+    };
+    // طيّ/فتح بطاقة الزيارة السابقة — يُحفظ التفضيل للجلسة، والعناصر تحته ترتفع تلقائياً
+    var _vePrevCollapsed = false;
+    try { _vePrevCollapsed = localStorage.getItem('vePrevCollapsed') === '1'; } catch (e) {}
+    window._vePrevToggle = function() {
+      var card = document.getElementById('prevVisitCard'); if (!card) return;
+      _vePrevCollapsed = !card.classList.contains('collapsed');
+      card.classList.toggle('collapsed', _vePrevCollapsed);
+      var top = card.querySelector('.ve-prev-top'); if (top) top.setAttribute('aria-expanded', _vePrevCollapsed ? 'false' : 'true');
+      try { localStorage.setItem('vePrevCollapsed', _vePrevCollapsed ? '1' : '0'); } catch (e) {}
+    };
+
+    // حافّة كل قسم تتلوّن متى كُتب فيه — إشارة صامتة لما اكتمل وما بقي
+    function _veSyncSteps() {
+      Array.prototype.forEach.call(document.querySelectorAll('#addNoteModal .ve-step'), function(step) {
+        var any = Array.prototype.some.call(step.querySelectorAll('textarea, input, select'), function(f) {
+          if (f.type === 'checkbox') return f.checked;
+          return (f.value || '').trim() !== '';
+        });
+        step.classList.toggle('filled', any);
+      });
+    }
+    /* ── نموّ الحقول مع الكتابة ──
+       الحقل صار سطراً على ورق، والسطر لا يكون له ارتفاع ثابت: يبدأ بسطر واحد
+       فيلاصق الخطُّ التسميةَ، ثم يطول بقدر ما يُكتب فيه بلا شريط تمرير داخلي. */
+    function veAutoGrow(el) {
+      if (!el || el.tagName !== 'TEXTAREA') return;
+      el.style.height = 'auto';
+      if (!el.scrollHeight) return;   // مخفيّ: القياس صفر فلا يُكتب ارتفاع خاطئ
+      // box-sizing:border-box — scrollHeight لا يشمل الحدّ، فيُضاف وإلّا قُصّ
+      // آخر سطر بمقدار سُمكه (والفائض مخفيّ فلا يظهر شريط تمرير يكشف القصّ)
+      el.style.height = (el.scrollHeight + (el.offsetHeight - el.clientHeight)) + 'px';
+    }
+    function veGrowAll() {
+      Array.prototype.forEach.call(document.querySelectorAll('#addNoteModal textarea'), veAutoGrow);
+    }
+    document.addEventListener('DOMContentLoaded', function() {
+      var m = document.getElementById('addNoteModal');
+      if (m) m.addEventListener('input', function(e) { veAutoGrow(e.target); _veSyncSteps(); });
+      if (m) m.addEventListener('change', _veSyncSteps);
+      // نموذج معلومات المريض صار أسطراً كذلك، فيتبع القاعدة نفسها
+      var pi = document.getElementById('patientInfoModal');
+      if (pi) pi.addEventListener('input', function(e) { veAutoGrow(e.target); });
+    });
+
+    // ===== محرّر الزيارة =====
+    // التحليل والأشعة لكل منهما نص مستقل تماماً
+    var _testBuf = { lab: '', imaging: '' };
+    var _curTestKind = 'lab';
+    window.openAddNoteModal = function(pid, idx) {
+      var p = allPatients[pid]; var v = (p && p.appointments && p.appointments[idx]) || {};
+      document.getElementById('notePatientId').value = pid;
+      document.getElementById('noteVisitIndex').value = idx;
+      _veRenderDanger(p);        // تنبيه الحساسية/المزمن فوق المحرّر
+      _veRenderPrevVisit(p, idx); // سياق الزيارة السابقة في العمود الجانبي
+      document.getElementById('diagnosisText').value = v.diagnosis || v.note || '';
+      var _cpEl = document.getElementById('complaintText'); if (_cpEl) _cpEl.value = v.complaint || '';
+      var _ceEl = document.getElementById('clinicalExamText'); if (_ceEl) _ceEl.value = v.clinicalExam || '';
+      document.getElementById('prescriptionText').value = v.prescription || '';
+      // نصوص مستقلة: نص التحليل في labTest، ونص الأشعة في imagingTest
+      _testBuf = { lab: v.labTest || '', imaging: v.imagingTest || '' };
+      var hasAny = !!((_testBuf.lab && _testBuf.lab.trim()) || (_testBuf.imaging && _testBuf.imaging.trim()));
+      document.getElementById('labTestToggle').checked = hasAny;
+      document.getElementById('labTestWrap').style.display = hasAny ? '' : 'none';
+      _curTestKind = (v.testKind === 'imaging') ? 'imaging' : 'lab';
+      document.getElementById('testKind').value = _curTestKind;
+      document.getElementById('labTestText').value = _testBuf[_curTestKind] || '';
+      _applyTestKindUI(_curTestKind);
+      // حقول الزيارة المخصّصة (قياسات حسب التخصص)
+      var _vf = getChartTemplate().visit;
+      // تُخفى/تُظهر خطوة القياسات كاملة (بعلامتها في سلسلة SOAP) لا البطاقة وحدها
+      var _vstep = document.getElementById('noteCustomStep'); if (_vstep) _vstep.style.display = _vf.length ? '' : 'none';
+      var _dbar = document.getElementById('dentalEditorBar'); if (_dbar) _dbar.style.display = _dentalEnabled() ? 'flex' : 'none';   // 🦷 شريط المخطط لكل زيارة
+      _veLoadSurgery(p, v);   // 🩺 جدولة عملية مرتبطة بهذه الزيارة
+      _veLoadOrtho(p, v);     // 🦷 بدء تقويم مرتبط بهذه الزيارة
+      buildCustomFieldInputs(document.getElementById('noteCustomFields'), _vf, v.custom, { variant: 'editor' });
+      // اسم المريض هو العنوان، والسياق (العمر · الزمرة · التاريخ · رقم الزيارة) سطر تحته
+      document.getElementById('visitEditorTitle').textContent = (p && p.name) || 'زيارة';
+      var _mAge = (p && p.birthDate) ? calculateAge(p.birthDate) : null;
+      var _mBits = [];
+      if (_mAge != null) _mBits.push(_mAge + ' سنة');
+      if (p && p.bloodType) _mBits.push(p.bloodType);
+      _mBits.push(formatDateAr(v.date) + (v.slot ? ' · ' + slotTimeOf(v) : ''));
+      if (p && p.appointments && p.appointments.length > 1) _mBits.push('الزيارة ' + (idx + 1));
+      document.getElementById('visitEditorSub').textContent = _mBits.join(' · ');
+      var m = document.getElementById('addNoteModal'); m.classList.remove('modal-hidden'); m.classList.add('modal-visible');
+      _veSyncSteps();   // العلامات تعكس ما هو مكتوب فعلاً عند الفتح
+      // بعد الإظهار: scrollHeight للعنصر المخفيّ صفر، فلا يُقاس إلا بعد الرسم
+      requestAnimationFrame(veGrowAll);
+      document.body.classList.add('editor-open');
+      loadContacts(renderEditorContacts);
+    };
+
+    window.toggleTestWrap = function(checked) {
+      document.getElementById('labTestWrap').style.display = checked ? '' : 'none';
+      if (checked) _veRenderLabRows();
+    };
+    // رقائق إدراج سريع — أكثر الطلبات شيوعاً حسب الفئة
+    var _VE_LAB_CHIPS = {
+      lab: ['CBC صورة دم', 'CRP', 'سكر صائم', 'وظائف كلى', 'وظائف كبد', 'شوارد', 'HbA1c', 'بول عام', 'زمرة دم', 'TSH'],
+      imaging: ['صورة صدر', 'إيكو قلب', 'CT دماغ', 'رنين للركبة', 'إيكو بطن', 'صورة عمود فقري', 'دوبلر أوعية', 'ماموغرام']
+    };
+    function _veLabPlaceholder() {
+      return _curTestKind === 'imaging' ? 'نوع الصورة الشعاعية' : 'نوع الفحص المطلوب';
+    }
+    // ── صفوف الطلبات: عرضٌ فوق نصّ #labTestText (أسطر مفصولة بـ \n) ──
+    // القيمة تبقى نصّاً مجموعاً فلا يتغيّر الحفظ/الطباعة/الإرسال.
+    window._veRenderLabRows = function() {
+      var box = document.getElementById('labRows'); if (!box) return;
+      var ta = document.getElementById('labTestText');
+      var lines = String((ta && ta.value) || '').split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
+      if (!lines.length) lines = [''];
+      box.innerHTML = lines.map(function(ln) {
+        return '<div class="ve-labrow"><input type="text" value="' + _cfAttr(ln) + '" placeholder="' + _cfAttr(_veLabPlaceholder()) + '" oninput="_veSyncLabRows()">'
+          + '<button type="button" class="ve-rowdel" aria-label="حذف" onclick="_veDelLabRow(this)"><i class="fas fa-minus"></i></button></div>';
+      }).join('');
+      _veRenderLabChips();
+    };
+    window._veSyncLabRows = function() {
+      var box = document.getElementById('labRows'); var ta = document.getElementById('labTestText');
+      if (!box || !ta) return;
+      var vals = Array.prototype.map.call(box.querySelectorAll('.ve-labrow input'), function(i){ return i.value.trim(); }).filter(Boolean);
+      ta.value = vals.join('\n');
+    };
+    window._veDelLabRow = function(btn) {
+      var row = btn && btn.closest('.ve-labrow'); if (!row) return;
+      var box = row.parentNode; row.remove();
+      if (!box.querySelector('.ve-labrow')) _veRenderLabRows(); // اترك سطراً فارغاً واحداً
+      _veSyncLabRows();
+    };
+    window._veAddLabRow = function(text) {
+      var box = document.getElementById('labRows'); if (!box) return;
+      var rows = box.querySelectorAll('.ve-labrow');
+      var last = rows[rows.length - 1];
+      var lastIn = last && last.querySelector('input');
+      if (text) {
+        if (lastIn && !lastIn.value.trim()) { lastIn.value = text; }
+        else {
+          box.insertAdjacentHTML('beforeend', '<div class="ve-labrow"><input type="text" value="' + _cfAttr(text) + '" placeholder="' + _cfAttr(_veLabPlaceholder()) + '" oninput="_veSyncLabRows()"><button type="button" class="ve-rowdel" aria-label="حذف" onclick="_veDelLabRow(this)"><i class="fas fa-minus"></i></button></div>');
+        }
+      } else {
+        if (lastIn && !lastIn.value.trim()) { lastIn.focus(); return; }
+        box.insertAdjacentHTML('beforeend', '<div class="ve-labrow"><input type="text" placeholder="' + _cfAttr(_veLabPlaceholder()) + '" oninput="_veSyncLabRows()"><button type="button" class="ve-rowdel" aria-label="حذف" onclick="_veDelLabRow(this)"><i class="fas fa-minus"></i></button></div>');
+      }
+      var added = box.querySelector('.ve-labrow:last-child input'); if (added) added.focus();
+      _veSyncLabRows();
+    };
+    function _veRenderLabChips() {
+      var box = document.getElementById('labQuickChips'); if (!box) return;
+      box.innerHTML = (_VE_LAB_CHIPS[_curTestKind === 'imaging' ? 'imaging' : 'lab'] || []).map(function(t) {
+        return '<button type="button" class="ve-chip" data-t="' + _cfAttr(t) + '">+ ' + escapeHtml(t) + '</button>';
+      }).join('');
+      Array.prototype.forEach.call(box.querySelectorAll('.ve-chip'), function(c) {
+        c.addEventListener('click', function() { _veAddLabRow(c.getAttribute('data-t')); });
+      });
+    }
+    function _applyTestKindUI(kind) {
+      var isImg = kind === 'imaging';
+      document.getElementById('testKindLabBtn').classList.toggle('active', !isImg);
+      document.getElementById('testKindImgBtn').classList.toggle('active', isImg);
+      var tl = document.getElementById('testListLabel'); if (tl) tl.textContent = isImg ? 'إرسال إلى مركز أشعة' : 'إرسال إلى مخبر';
+      _veRenderLabRows();
+      renderEditorContacts();
+    }
+    window.setTestKind = function(kind) {
+      // احفظ نص الفئة الحالية قبل التبديل ثم استرجع نص الفئة الجديدة
+      _veSyncLabRows();
+      var ta = document.getElementById('labTestText');
+      _testBuf[_curTestKind] = ta.value;
+      _curTestKind = kind;
+      document.getElementById('testKind').value = kind;
+      ta.value = _testBuf[kind] || '';
+      _applyTestKindUI(kind);
+    };
+    // يقرأ النصوص الحالية ويكتبها في كائن الزيارة (نصّان مستقلان)
+    function _flushTestFields(v) {
+      if (typeof _veSyncLabRows === 'function') _veSyncLabRows();
+      _testBuf[_curTestKind] = document.getElementById('labTestText').value;
+      var on = document.getElementById('labTestToggle').checked;
+      v.labTest     = on ? (_testBuf.lab || '').trim() : '';
+      v.imagingTest = on ? (_testBuf.imaging || '').trim() : '';
+      v.testKind    = _curTestKind;
+    }
+
+    // ===== قراءة جهات الاتصال مباشرة داخل المحرّر + إرسال واتساب/SMS =====
+    function _editorContactRow(ct, kind) {
+      var digits = String(ct.phone || '').replace(/[^0-9+]/g, '');
+      return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--bg);border:1.5px solid var(--border);border-radius:10px;padding:8px 10px;margin-top:8px;">'
+        + '<div style="min-width:0;"><div style="font-weight:700;font-size:.82rem;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(ct.name || '') + '</div>'
+        + '<div dir="ltr" style="font-size:.72rem;color:var(--text-muted);text-align:right;">' + escapeHtml(ct.phone || '') + '</div></div>'
+        + '<div style="display:flex;gap:6px;flex-shrink:0;">'
+          + '<button title="إرسال واتساب" onclick="sendEditorTo(\'' + kind + '\',\'wa\',\'' + digits + '\')" style="width:34px;height:34px;border-radius:9px;border:none;background:#16a34a;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.95rem;"><i class="fab fa-whatsapp"></i></button>'
+          + '<button title="إرسال SMS" onclick="sendEditorTo(\'' + kind + '\',\'sms\',\'' + digits + '\')" style="width:34px;height:34px;border-radius:9px;border:none;background:#2563eb;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.85rem;"><i class="fas fa-sms"></i></button>'
+        + '</div></div>';
+    }
+    function _editorEmpty(t) {
+      return '<div class="ve-empty">'
+        + '<span class="ve-empty-ic"><i class="fas fa-address-book"></i></span>'
+        + '<span class="ve-empty-t">' + escapeHtml(t) + '</span>'
+        + '<button type="button" class="btn btn-outline btn-sm" onclick="openContactsManager()"><i class="fas fa-plus"></i> إضافة جهة</button>'
+        + '</div>';
+    }
+    window.renderEditorContacts = function() {
+      var ph = document.getElementById('editorPharmacyList');
+      var tl = document.getElementById('editorTestList');
+      if (!ph || !tl) return;
+      var kind = (document.getElementById('testKind') || {}).value || 'lab';
+      var pharmacies = (_contacts || []).filter(function(c) { return c.type === 'pharmacy'; });
+      var tests = (_contacts || []).filter(function(c) { return kind === 'imaging' ? c.type === 'imaging' : c.type === 'lab'; });
+      ph.innerHTML = pharmacies.length ? pharmacies.map(function(c) { return _editorContactRow(c, 'pharmacy'); }).join('') : _editorEmpty('لا توجد صيدليات محفوظة');
+      tl.innerHTML = tests.length ? tests.map(function(c) { return _editorContactRow(c, kind === 'imaging' ? 'imaging' : 'lab'); }).join('') : _editorEmpty(kind === 'imaging' ? 'لا توجد مراكز أشعة محفوظة' : 'لا توجد مخابر محفوظة');
+    };
+    window.sendEditorTo = function(kind, channel, phone) {
+      var pid = document.getElementById('notePatientId').value;
+      var idx = parseInt(document.getElementById('noteVisitIndex').value, 10);
+      var p = allPatients[pid]; var v = p && p.appointments && p.appointments[idx]; if (!v) return;
+      // اقرأ القيم الحالية من الحقول
+      v.diagnosis    = document.getElementById('diagnosisText').value.trim();
+      v.prescription = document.getElementById('prescriptionText').value.trim();
+      var _cp = document.getElementById('complaintText'); if (_cp) v.complaint = _cp.value.trim();
+      var _ce = document.getElementById('clinicalExamText'); if (_ce) v.clinicalExam = _ce.value.trim();
+      _flushTestFields(v);
+      v.custom = readCustomFieldInputs(document.getElementById('noteCustomFields'));   // حقول الزيارة المخصّصة
+      var testText = (kind === 'imaging') ? v.imagingTest : v.labTest;
+      if (kind === 'pharmacy' && !v.prescription) { showToast('اكتب الوصفة أولاً', 'error'); return; }
+      if (kind !== 'pharmacy' && !testText) { showToast('اكتب نوع ' + (kind === 'imaging' ? 'الأشعة' : 'التحليل') + ' أولاً', 'error'); return; }
+      v.noteUpdatedAt = Date.now();
+      window._fb.setDoc(window._fb.docRef('patients', pid), p, { merge: true }).catch(function(e) { console.error(e); });
+      var msg = kind === 'pharmacy' ? _buildPrescriptionMsg(p, v) : _buildTestMsg(p, v, kind);
+      var cleaned = String(phone).replace(/[^0-9+]/g, '');
+      if (channel === 'wa') {
+        var wa = cleaned; if (wa && wa.charAt(0) !== '+') wa = '+' + wa;
+        window.open('https://wa.me/' + wa + '?text=' + encodeURIComponent(msg), '_blank');
+      } else {
+        window.location.href = 'sms:' + cleaned + '?body=' + encodeURIComponent(msg.replace(/\*/g, ''));
+      }
+    };
+
+    function _patientLine(p) {
+      var age = p.birthDate ? calculateAge(p.birthDate) + ' سنة' : '-';
+      var s = 'المريض: ' + (p.name || '-') + '\nالعمر: ' + age;
+      if (p.phone) s += '\nالهاتف: ' + p.phone;
+      if (p.bloodType) s += '\nزمرة الدم: ' + p.bloodType;
+      if (p.chronicDiseases) s += '\nأمراض مزمنة: ' + p.chronicDiseases;
+      return s;
+    }
+    function _buildPrescriptionMsg(p, v) {
+      return '*وصفة طبية*\n' + _patientLine(p) + '\nالتاريخ: ' + formatDateAr(v.date) + '\n\n*الأدوية:*\n' + (v.prescription || '(لا توجد وصفة)');
+    }
+    function _buildTestMsg(p, v, kind) {
+      kind = kind || v.testKind || 'lab';
+      var isImg = kind === 'imaging';
+      var text = isImg ? (v.imagingTest || '') : (v.labTest || '');
+      return (isImg ? '*طلب صورة شعاعية (أشعة)*' : '*طلب تحليل مخبري*') + '\n' + _patientLine(p)
+        + '\nالتاريخ: ' + formatDateAr(v.date) + '\n\n' + (isImg ? 'الصور المطلوبة:' : 'التحاليل المطلوبة:') + '\n' + (text || '-');
+    }
+    function _buildLabMsg(p, v) { return _buildTestMsg(p, v); }
+    function _buildPatientMsg(p, v) {
+      var s = '';
+      if (v.diagnosis) s += '*التشخيص:*\n' + v.diagnosis + '\n\n';
+      if (v.prescription) s += '*الوصفة الطبية:*\n' + v.prescription + '\n\n';
+      if (v.labTest) s += '*التحاليل المطلوبة:*\n' + v.labTest + '\n\n';
+      if (v.imagingTest) s += '*الأشعة المطلوبة:*\n' + v.imagingTest;
+      return s.trim() || 'مرحباً';
+    }
+
+    // حذف الزيارة من داخل المحرّر (تأكيد داخل النظام ثم إغلاق وإعادة فتح الاضبارة)
+    window.deleteVisitCurrent = function() {
+      var pid = document.getElementById('notePatientId').value;
+      var idx = parseInt(document.getElementById('noteVisitIndex').value, 10);
+      var p = allPatients[pid]; if (!p || !p.appointments || !p.appointments[idx]) return;
+      var v = p.appointments[idx];
+      appConfirm('حذف هذه الزيارة نهائياً؟\n' + (v.visitType || 'زيارة') + ' — ' + formatDateAr(v.date) + '\nلا يمكن التراجع.', 'حذف الزيارة').then(function(ok) {
+        if (!ok) return;
+        p.appointments.splice(idx, 1);
+        if (typeof p.totalVisits === 'number') p.totalVisits = Math.max(0, p.totalVisits - 1);
+        window._fb.setDoc(window._fb.docRef('patients', pid), p, { merge: true })
+          .then(function() { showToast('تم حذف الزيارة', 'success'); })
+          .catch(function(e) { showToast('فشل حذف الزيارة', 'error'); console.error(e); });
+        closeAddNoteModal();
+        openPatientDetailsModal(pid);
+      });
+    };
+    window.saveVisit = function(sendWhatsapp, sendTo) {
+      var pid = document.getElementById('notePatientId').value;
+      var idx = parseInt(document.getElementById('noteVisitIndex').value, 10);
+      var p = allPatients[pid]; if (!p || !p.appointments || !p.appointments[idx]) return;
+      var v = p.appointments[idx];
+      v.diagnosis    = document.getElementById('diagnosisText').value.trim();
+      v.prescription = document.getElementById('prescriptionText').value.trim();
+      var _cp = document.getElementById('complaintText'); if (_cp) v.complaint = _cp.value.trim();
+      var _ce = document.getElementById('clinicalExamText'); if (_ce) v.clinicalExam = _ce.value.trim();
+      _flushTestFields(v);
+      v.custom = readCustomFieldInputs(document.getElementById('noteCustomFields'));   // حقول الزيارة المخصّصة
+      v.noteUpdatedAt = Date.now();
+      _veFlushSurgery(p, v);   // 🩺 عملية مجدولة مرتبطة بهذه الزيارة
+      _veFlushOrtho(p, v);     // 🦷 دورة تقويم مرتبطة بهذه الزيارة
+      _guardDocSize(pid, p).then(function(go) {
+        if (!go) return;   // الطبيب اختار عدم المتابعة — النصّ يبقى في المحرّر
+        window._fb.setDoc(window._fb.docRef('patients', pid), p, { merge: true })
+          .then(function() { showToast('تم حفظ الزيارة', 'success'); })
+          .catch(function(e) { showToast('فشل الحفظ', 'error'); console.error(e); });
+        closeAddNoteModal();
+        openPatientDetailsModal(pid);
+      });
+    };
+
+    window.printPrescriptionCurrent = function() {
+      var pid = document.getElementById('notePatientId').value;
+      var idx = parseInt(document.getElementById('noteVisitIndex').value, 10);
+      var p = allPatients[pid], v = p && p.appointments && p.appointments[idx];
+      if (v) { v.prescription = document.getElementById('prescriptionText').value.trim(); _flushTestFields(v); }
+      printPrescription(pid, idx);
+    };
+
+    window.sendVisitToContact = function(pid, idx, type) {
+      var p = allPatients[pid], v = p && p.appointments && p.appointments[idx]; if (!v) return;
+      if (type === 'pharmacy') { openContactPicker(_buildPrescriptionMsg(p, v), 'pharmacy'); return; }
+      // type هنا 'lab' أو 'imaging'
+      openContactPicker(_buildTestMsg(p, v, type), type === 'imaging' ? 'imaging' : 'lab');
+    };
+
+    // ===== منتقي جهة الاتصال (صيدلية/مخبر) =====
+    var _pickerMsg = '';
+    window.sendPickerTo = function(phone) {
+      var cleaned = String(phone).replace(/[^0-9+]/g, '');
+      if (cleaned && !cleaned.startsWith('+')) cleaned = '+' + cleaned;
+      window.open('https://wa.me/' + cleaned + '?text=' + encodeURIComponent(_pickerMsg), '_blank');
+      closeSendToContact();
+    };
+    window.openContactPicker = function(msg, typeFilter) {
+      _pickerMsg = msg || '';
+      document.getElementById('sendToContactModal').classList.remove('hidden');
+      var list = document.getElementById('sendContactList'), empty = document.getElementById('sendContactEmpty');
+      loadContacts(function() {
+        var items = (_contacts || []).filter(function(c) { return !typeFilter || c.type === typeFilter; });
+        if (!items.length) { list.style.display = 'none'; empty.style.display = 'block'; return; }
+        empty.style.display = 'none'; list.style.display = 'block';
+        list.innerHTML = items.map(function(ct) {
+          var typeLabel = _contactTypeLabel(ct.type);
+          var typeClass = _contactTypeClass(ct.type);
+          return '<div class="contact-card" style="margin-bottom:8px;"><div class="contact-card-info">'
+            + '<div style="display:flex;align-items:center;gap:6px;"><span class="contact-card-name">' + escapeHtml(ct.name) + '</span>'
+            + '<span class="contact-card-type ' + typeClass + '">' + typeLabel + '</span></div>'
+            + '<span class="contact-card-phone">' + escapeHtml(ct.phone) + '</span></div>'
+            + '<button class="btn-send-contact" onclick="sendPickerTo(\'' + String(ct.phone).replace(/[^0-9+]/g,'') + '\')"><i class="fab fa-whatsapp"></i> إرسال</button></div>';
+        }).join('');
+      });
+    };
+
+    // ===== تعديل معلومات المريض =====
+    window.openPatientInfoEditor = function(pid) {
+      var p = allPatients[pid]; if (!p) return;
+      document.getElementById('piPatientId').value = pid;
+      document.getElementById('piName').value = p.name || '';
+      document.getElementById('piPhone').value = p.phone || '';
+      document.getElementById('piBirth').value = p.birthDate || '';
+      document.getElementById('piAddress').value = p.address || '';
+      document.getElementById('piBlood').value = p.bloodType || '';
+      document.getElementById('piChronic').value = p.chronicDiseases || '';
+      buildCustomFieldInputs(document.getElementById('piCustomFields'), getChartTemplate().patient, p.custom, 'حقول مخصّصة');
+      updatePiAge();
+      document.getElementById('patientInfoModal').classList.remove('hidden');
+      requestAnimationFrame(function() {
+        Array.prototype.forEach.call(document.querySelectorAll('#patientInfoModal textarea'), veAutoGrow);
+      });
+    };
+    window.updatePiAge = function() {
+      var b = document.getElementById('piBirth').value;
+      var el = document.getElementById('piAgeDisplay'); if (!el) return;
+      var a = b ? calculateAge(b) : null;
+      el.textContent = (a != null && a >= 0) ? '(' + a + ' سنة)' : '';
+    };
+    window.closePatientInfoEditor = function() { document.getElementById('patientInfoModal').classList.add('hidden'); };
+    window.savePatientInfo = function() {
+      var pid = document.getElementById('piPatientId').value; var p = allPatients[pid]; if (!p) return;
+      p.name = document.getElementById('piName').value.trim() || p.name;
+      p.phone = document.getElementById('piPhone').value.trim();
+      p.birthDate = document.getElementById('piBirth').value;
+      p.address = document.getElementById('piAddress').value.trim();
+      p.bloodType = document.getElementById('piBlood').value;
+      p.chronicDiseases = document.getElementById('piChronic').value.trim();
+      p.custom = readCustomFieldInputs(document.getElementById('piCustomFields'));   // حقول المريض المخصّصة
+      window._fb.setDoc(window._fb.docRef('patients', pid), p, { merge: true })
+        .then(function() { showToast('تم حفظ المعلومات', 'success'); })
+        .catch(function(e) { showToast('فشل الحفظ', 'error'); console.error(e); });
+      closePatientInfoEditor();
+      openPatientDetailsModal(pid);
+    };
+
+    // ===== طباعة PDF =====
+    function _printWindow(title, bodyHtml) {
+      var w = window.open('', '_blank'); if (!w) { showToast('اسمح بالنوافذ المنبثقة للطباعة', 'error'); return; }
+      var clinic = (typeof settings !== 'undefined' && settings && settings.title) ? settings.title : 'لوحة الطبيب';
+      w.document.write('<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>' + title + '</title>'
+        + '<style>*{font-family:Tajawal,Arial,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact;}body{margin:0;padding:28px;color:#0f172a;}h1{font-size:20px;margin:0 0 2px;color:#0d9488;}.muted{color:#64748b;font-size:12px;}.hdr{border-bottom:2px solid #0d9488;padding-bottom:12px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:flex-end;}table{width:100%;border-collapse:collapse;font-size:13px;}th,td{border:1px solid #e2e8f0;padding:7px 9px;text-align:right;}th{background:#f0fdfa;color:#0f766e;}.box{border:1.5px solid #e2e8f0;border-radius:10px;padding:14px;margin-bottom:14px;}.rx{white-space:pre-wrap;line-height:1.9;font-size:15px;}.label{font-size:12px;color:#64748b;}.val{font-weight:700;}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}@media print{body{padding:14px;}}</style></head><body>'
+        + '<div class="hdr"><div><h1>' + clinic + '</h1><div class="muted">' + title + '</div></div><div class="muted">' + new Date().toLocaleString('ar-EG') + '</div></div>'
+        + bodyHtml
+        + '<scr' + 'ipt>window.onload=function(){setTimeout(function(){window.print();},250);}</scr' + 'ipt></body></html>');
+      w.document.close();
+    }
+    // ===== قالب طباعة مشترك (نفس هوية الوصفة) =====
+    function _printSheet(pillText, innerHtml) {
+      var s = (typeof settings !== 'undefined' && settings) ? settings : {};
+      var docName = s.title || 'الطبيب', specialty = s.specialty || '';
+      var mobile = s.mobile || '', landline = s.landline || '', address = s.address || '';
+      var _printBase = window.location.href.replace(/\/[^\/]*(\?.*)?$/, '/');
+      var emblem = '<svg viewBox="0 0 100 100" width="100%" height="100%"><path d="M50 86 C22 64 9 46 9 31 A20 20 0 0 1 50 23 A20 20 0 0 1 91 31 C91 46 78 64 50 86 Z" fill="none" stroke="#0d9488" stroke-width="3.4"/><rect x="44" y="36" width="12" height="30" rx="2" fill="#0d9488"/><rect x="35" y="45" width="30" height="12" rx="2" fill="#0d9488"/></svg>';
+      var brandHtml = '<img src="brand-logo.png" alt="DocBook" style="max-width:120px;max-height:88px;object-fit:contain;display:block;">';
+      var css = '@page{size:A4;margin:0;}'
+        + '*{font-family:Cairo,Tajawal,Arial,sans-serif;box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'
+        + 'html,body{margin:0;padding:0;background:#fff;}'
+        // الزخارف ثابتة فتتكرّر في كل صفحة عند الطباعة
+        + '.wt,.wb{position:fixed;left:0;width:100%;height:150px;z-index:0;} .wt{top:0;} .wb{bottom:0;}'
+        + '.pill{position:fixed;top:30px;right:46px;z-index:6;display:flex;align-items:center;gap:9px;background:rgba(255,255,255,.18);border:2px solid rgba(255,255,255,.85);color:#fff;border-radius:30px;padding:7px 18px 7px 8px;font-weight:800;font-size:15px;}'
+        + '.pill .pc{width:24px;height:24px;border-radius:50%;background:#fff;color:#0d9488;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:900;}'
+        + '.watermark{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:300px;height:300px;opacity:.06;z-index:0;}'
+        + '.contact{position:fixed;bottom:46px;left:0;width:100%;z-index:6;display:flex;justify-content:center;align-items:center;flex-wrap:wrap;gap:18px;color:#fff;font-size:12.5px;font-weight:600;padding:0 30px;}'
+        + '.contact .ct b{font-weight:800;} .contact .sep{opacity:.55;}'
+        // جدول الصفحة: thead/tfoot يحجزان مساحة الترويسة/التذييل في كل صفحة فلا يتداخل المحتوى
+        + '.page{width:100%;border-collapse:collapse;}'
+        + '.page>thead>tr>td,.page>tfoot>tr>td,.page>tbody>tr>td{border:none;padding:0;vertical-align:top;}'
+        + '.head-space{height:158px;} .foot-space{height:160px;}'
+        + '.content{position:relative;z-index:3;padding:0 46px;}'
+        + '.head{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:6px;}'
+        + '.docinfo{text-align:right;min-width:0;}'
+        + '.dname{font-size:30px;font-weight:900;color:#0f766e;line-height:1.1;}'
+        + '.dspec{font-size:15px;font-weight:800;color:#0d9488;margin-top:6px;} .dspec .dash{color:#7fcabf;}'
+        + '.logo{flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;}'
+        + '.brand-emblem{width:96px;height:96px;}'
+        + '.brand-text{font-weight:900;font-size:26px;letter-spacing:-.5px;line-height:1;} .brand-text .b1{color:#115e59;} .brand-text .b2{color:#0d9488;}'
+        + '.divider{height:1.5px;background:#e2e8f0;margin:10px 0 22px;}'
+        + '.sec-title{font-size:15px;font-weight:800;color:#0f766e;margin:18px 0 10px;}'
+        + '.info-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:8px;break-inside:avoid;}'
+        + '.info-cell{border:1.5px solid #e2e8f0;border-radius:10px;padding:9px 12px;}'
+        + '.info-cell.full{grid-column:1/-1;}'
+        + '.info-cell .k{font-size:11.5px;color:#64748b;font-weight:600;margin-bottom:3px;}'
+        + '.info-cell .vv{font-size:14px;color:#0f172a;font-weight:700;word-break:break-word;}'
+        // جدول أرشيف الزيارات: يتكرّر رأسه في كل صفحة والصفوف لا تنقسم
+        + '.atbl{width:100%;border-collapse:collapse;font-size:13.5px;}'
+        + '.atbl th,.atbl td{border:1px solid #e2e8f0;padding:9px 10px;text-align:right;}'
+        + '.atbl th{background:#f0fdfa;color:#0f766e;font-weight:800;}'
+        + '.atbl thead{display:table-header-group;} .atbl tr{break-inside:avoid;}'
+        // عناصر الوصفة
+        + '.grid2{display:grid;grid-template-columns:1fr 1px 1fr;gap:30px;margin-bottom:26px;}'
+        + '.vdiv{background:#d7e6e3;}'
+        + '.r{display:flex;align-items:flex-end;gap:8px;margin-bottom:24px;}'
+        + '.r .lb{font-weight:800;color:#0f766e;white-space:nowrap;font-size:13.5px;padding-bottom:2px;}'
+        + '.r .vl{flex:1;border-bottom:1.6px dotted #5bb8af;min-height:20px;font-weight:700;color:#0f172a;font-size:13.5px;padding:0 4px 3px;text-align:center;}'
+        + '.rx{display:flex;align-items:center;gap:10px;margin:6px 0 14px;}'
+        + '.rxsym{font-size:42px;font-weight:900;color:#0f766e;font-family:Georgia,serif;line-height:1;} .rxsym sub{font-size:22px;}'
+        + '.rxline{flex:1;height:2px;background:#0d9488;border-radius:2px;}'
+        + '.rxbody{min-height:330px;white-space:pre-wrap;line-height:2.1;font-size:16px;color:#0f172a;padding:0 6px;}'
+        + '.sig{margin-top:30px;display:flex;justify-content:flex-start;}'
+        + '.sig .box-s{width:240px;text-align:center;} .sig .lb{font-weight:800;color:#0f766e;font-size:13.5px;} .sig .ln{margin-top:30px;border-top:1.6px dotted #5bb8af;}';
+      var waveTop = '<svg class="wt" viewBox="0 0 1000 200" preserveAspectRatio="none"><path d="M0,0 H1000 V120 C835,200 700,150 500,162 C320,172 165,200 0,150 Z" fill="#0d9488"/><path d="M0,0 H1000 V92 C800,158 660,112 480,130 C300,148 150,150 0,122 Z" fill="#3bbcae" opacity="0.5"/></svg>';
+      var waveBot = '<svg class="wb" viewBox="0 0 1000 200" preserveAspectRatio="none"><path d="M0,200 H1000 V92 C820,18 690,72 500,56 C320,40 160,12 0,72 Z" fill="#0d9488"/><path d="M0,200 H1000 V122 C800,58 650,102 470,86 C300,72 150,80 0,112 Z" fill="#3bbcae" opacity="0.5"/></svg>';
+      var cps = [];
+      if (address)  cps.push('<span class="ct"><b>العنوان:</b> ' + escapeHtml(address) + '</span>');
+      if (mobile)   cps.push('<span class="ct"><b>موبايل:</b> ' + escapeHtml(mobile) + '</span>');
+      if (landline) cps.push('<span class="ct"><b>الأرضي:</b> ' + escapeHtml(landline) + '</span>');
+      var contactHtml = cps.join('<span class="sep">•</span>');
+      var head = '<div class="head"><div class="docinfo"><div class="dname">' + escapeHtml(docName) + '</div>'
+        + (specialty ? '<div class="dspec"><span class="dash">—</span> ' + escapeHtml(specialty) + ' <span class="dash">—</span></div>' : '')
+        + '</div><div class="logo">' + brandHtml + '</div></div><div class="divider"></div>';
+      var html = '<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><base href="' + _printBase + '"><title>' + pillText + '</title>'
+        + '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+        + '<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet">'
+        + '<style>' + css + '</style></head><body>'
+        + waveTop + waveBot
+        + '<div class="pill"><span class="pc">+</span> ' + pillText + '</div>'
+        + '<div class="watermark">' + emblem + '</div>'
+        + (contactHtml ? '<div class="contact">' + contactHtml + '</div>' : '')
+        + '<table class="page"><thead><tr><td><div class="head-space"></div></td></tr></thead>'
+        + '<tfoot><tr><td><div class="foot-space"></div></td></tr></tfoot>'
+        + '<tbody><tr><td><div class="content">' + head + innerHtml + '</div></td></tr></tbody></table>'
+        + '</body></html>';
+      _doPrint(html);
+    }
+
+    // ===== طباعة عبر iframe مخفي — لا نوافذ منبثقة ولا تعليق للتطبيق =====
+    function _doPrint(html) {
+      // على الموبايل/التابلت: الـ iframe المخفي يطبع صفحة الموقع — لذا نفتح تبويب طباعة مستقلاً
+      var isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+        || (window.matchMedia && window.matchMedia('(max-width: 820px)').matches);
+      if (isMobile) {
+        var w = window.open('', '_blank');
+        if (!w) { showToast('اسمح بالنوافذ المنبثقة للطباعة', 'error'); return; }
+        var withPrint = html.replace('</body>',
+          '<scr' + 'ipt>window.onload=function(){setTimeout(function(){try{window.focus();window.print();}catch(e){}},500);};<\/scr' + 'ipt></body>');
+        w.document.open(); w.document.write(withPrint); w.document.close();
+        return;
+      }
+      // الديسكتوب: iframe مخفي (لا تعليق للتطبيق)
+      var old = document.getElementById('_printFrame');
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+      var f = document.createElement('iframe');
+      f.id = '_printFrame';
+      f.setAttribute('aria-hidden', 'true');
+      f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+      document.body.appendChild(f);
+      var fired = false;
+      function cleanup() { if (f && f.parentNode) f.parentNode.removeChild(f); }
+      function fire() {
+        if (fired) return; fired = true;
+        try {
+          var cw = f.contentWindow;
+          cw.onafterprint = function() { setTimeout(cleanup, 200); };
+          cw.focus();
+          cw.print();
+        } catch (e) { console.error('print error', e); }
+        setTimeout(cleanup, 60000); // تنظيف احتياطي
+      }
+      f.onload = function() { setTimeout(fire, 450); };
+      var d = f.contentWindow.document;
+      d.open(); d.write(html); d.close();
+      setTimeout(fire, 1600); // احتياطي إن لم يُطلق onload
+    }
+
+    window.printPatientChart = function(pid) {
+      var p = allPatients[pid]; if (!p) return;
+      var age = p.birthDate ? calculateAge(p.birthDate) : null;
+      function cell(k, val, full) { return '<div class="info-cell' + (full ? ' full' : '') + '"><div class="k">' + k + '</div><div class="vv">' + (val || '-') + '</div></div>'; }
+      // خلايا حقول المريض المخصّصة (تُطبع فقط الحقول التي لها قيمة)
+      var pcustom = getChartTemplate().patient.map(function(f) {
+        var d = _cfDisplayVal(f, (p.custom || {})[f.id]);
+        return d === '' ? '' : cell(escapeHtml(f.label), escapeHtml(d));
+      }).join('');
+      var info = '<div class="sec-title">معلومات المريض</div><div class="info-grid">'
+        + cell('الاسم', escapeHtml(p.name || '-'))
+        + cell('الهاتف', escapeHtml(p.phone || '-'))
+        + cell('تاريخ الميلاد', p.birthDate ? formatDateAr(p.birthDate) : '-')
+        + cell('العمر', age != null ? age + ' سنة' : '-')
+        + cell('زمرة الدم', escapeHtml(p.bloodType || '-'))
+        + cell('العنوان', escapeHtml(p.address || '-'))
+        + pcustom
+        + cell('أمراض مزمنة', escapeHtml(p.chronicDiseases || 'لا يوجد'), true)
+        + '</div>';
+      // السوابق الجراحية (العمليات التي تمّت) — تُطبع مع التاريخ الدائم للمريض إن فُعّلت الميزة
+      var surgHtml = '';
+      if (_surgeryEnabled()) {
+        var doneSurg = ((p.surgeries || []).filter(function(s){ return s.status === 'done'; }))
+          .sort(function(a, b){ if (!a.date) return 1; if (!b.date) return -1; return b.date.localeCompare(a.date); });
+        if (doneSurg.length) {
+          surgHtml = '<div class="sec-title">السوابق الجراحية</div><div class="info-grid">'
+            + doneSurg.map(function(s) {
+                var v = (s.date ? formatDateAr(s.date) : 'بلا تاريخ')
+                  + (s.complications ? ' — مضاعفات: ' + escapeHtml(s.complications) : '')
+                  + (s.note ? ' — ' + escapeHtml(s.note) : '');
+                return cell(escapeHtml(s.name || 'عملية'), v, true);
+              }).join('')
+            + '</div>';
+        }
+      }
+      info += surgHtml;
+      // تقويم الأسنان (الدورات النشطة) — تُطبع عند تفعيل ميزة التقويم
+      if (_orthoEnabled()) {
+        var actOrtho = ((p.ortho || []).filter(function(o){ return o.status === 'active'; }));
+        if (actOrtho.length) {
+          info += '<div class="sec-title">تقويم الأسنان</div><div class="info-grid">'
+            + actOrtho.map(function(o) {
+                var v = (o.type === 'removable' ? 'متحرّك' : o.type === 'clear' ? 'شفّاف' : 'ثابت')
+                  + (o.startDate ? ' — بدأ ' + formatDateAr(o.startDate) : '')
+                  + (o.expectedMonths ? ' — مدّة متوقّعة ' + o.expectedMonths + ' شهر' : '')
+                  + ' — جلسات شدّ: ' + ((o.adjustments || []).length);
+                return cell('دورة تقويم', v, true);
+              }).join('')
+            + '</div>';
+        }
+      }
+      // عمود إضافي لحقول الزيارة المخصّصة (يظهر فقط عند وجود حقول زيارة مُعرّفة)
+      var vFields = getChartTemplate().visit;
+      function _vCustomText(v) {
+        var custom = (v && v.custom) || {};
+        return vFields.map(function(f) {
+          var d = _cfDisplayVal(f, custom[f.id]);
+          return d === '' ? '' : (escapeHtml(f.label) + ': ' + escapeHtml(d));
+        }).filter(Boolean).join(' · ');
+      }
+      var visits = (p.appointments || []).slice().sort(function(a, b) { return (a.date || '').localeCompare(b.date || ''); });
+      // عمود الشكوى يظهر فقط إن سجّلها الطبيب في زيارة واحدة على الأقل — لا نوسّع الجدول بلا داعٍ
+      var hasComplaint = visits.some(function(v) { return v.complaint && v.complaint.trim(); });
+      var cols = 4 + (hasComplaint ? 1 : 0) + (vFields.length ? 1 : 0);
+      var rows = visits.map(function(v, i) {
+        return '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(v.visitType || '-') + '</td><td>' + formatDateAr(v.date) + '</td><td>' + slotTimeOf(v) + '</td>'
+          + (hasComplaint ? ('<td>' + (v.complaint ? escapeHtml(v.complaint) : '-') + '</td>') : '')
+          + (vFields.length ? ('<td>' + (_vCustomText(v) || '-') + '</td>') : '') + '</tr>';
+      }).join('');
+      if (!rows) rows = '<tr><td colspan="' + cols + '" style="text-align:center;color:#64748b;">لا توجد زيارات</td></tr>';
+      var archive = '<div class="sec-title">أرشيف الزيارات</div><table class="atbl"><thead><tr><th style="width:42px;">#</th><th>نوع الزيارة</th><th>التاريخ</th><th>الوقت</th>'
+        + (hasComplaint ? '<th>الشكوى</th>' : '')
+        + (vFields.length ? '<th>القياسات / البيانات</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>';
+      _printSheet('إضبارة المريض', info + archive);
+    };
+    window.printPrescription = function(pid, idx) {
+      var p = allPatients[pid]; var v = p && p.appointments && p.appointments[idx]; if (!v) return;
+      function ic(path) {
+        return '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="#0d9488" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">' + path + '</svg>';
+      }
+      var icUser = ic('<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>');
+      var icPin  = ic('<path d="M12 22s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12z"/><circle cx="12" cy="10" r="2.6"/>');
+      var icCal  = ic('<rect x="3" y="4" width="18" height="17" rx="2.5"/><line x1="3" y1="9.5" x2="21" y2="9.5"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/>');
+      function row(icon, label, val) {
+        return '<div class="r">' + icon + '<span class="lb">' + label + '</span><span class="vl">' + (val ? escapeHtml(val) : '') + '</span></div>';
+      }
+      var rxText = v.prescription ? escapeHtml(v.prescription) : '';
+      var inner = '<div class="grid2">'
+          + '<div class="col">' + row(icUser, 'اسم المريض/ة :', p.name) + row(icPin, 'العنوان :', p.address) + '</div>'
+          + '<div class="vdiv"></div>'
+          + '<div class="col">' + row(icCal, 'التاريخ :', formatDateAr(v.date)) + '</div>'
+        + '</div>'
+        + '<div class="rx"><span class="rxsym">R<sub>x</sub></span><span class="rxline"></span></div>'
+        + '<div class="rxbody">' + rxText + '</div>'
+        + '<div class="sig"><div class="box-s"><div class="lb">توقيع الطبيب</div><div class="ln"></div></div></div>';
+      _printSheet('وصفة طبية', inner);
+    };
+
+    /* ============================================================
+       نظام تخصيص الاضبارة — حقول مخصّصة حسب تخصص الطبيب
+       • تعريفات الحقول تُخزَّن في settings.chartTemplate = { patient:[], visit:[] }
+         (تُحمَّل مع بقية الإعدادات من settings/doctor — بلا قراءة إضافية).
+       • القيم تُخزَّن داخل مستند المريض: p.custom[fieldId] (مستوى المريض)
+         وداخل كل زيارة: v.custom[fieldId] (مستوى الزيارة).
+       • لا حاجة لتعديل قاعدة البيانات إطلاقاً: Firestore بلا مخطط ثابت،
+         وقاعدة patients مفتوحة للكادر، والحفظ عبر setDoc(...,{merge:true}) القائم.
+       ============================================================ */
+
+    // أنواع الحقول المدعومة
+    var CF_TYPES = [
+      { v: 'text',     label: 'نص' },
+      { v: 'textarea', label: 'نص طويل' },
+      { v: 'number',   label: 'رقم' },
+      { v: 'date',     label: 'تاريخ' },
+      { v: 'select',   label: 'قائمة منسدلة' },
+      { v: 'checkbox', label: 'نعم / لا' }
+    ];
+
+    /* ── الأدوار الدلالية: ما «يعنيه» الحقل، لا شكله فقط ──
+       بلا دور، الأداة السريرية تخمّن من النوع («رقم؟ ارسمه») فتخرج رسوماً عامّة
+       لا معرفة سريرية. بالدور تعرف أن هذا الرقم وزنُ طفل فتقارنه بمنحنيات النموّ.
+       القاعدة: الدور يُلصَق بالحقل مرّة، وتُبنى عليه الأدوات — لا مطابقة أسماء هشّة.
+       (كان محصوراً بـ role:'lmp' على حقول التاريخ؛ عُمِّم هنا.) */
+    var CF_ROLES = [
+      { v: 'lmp',    label: 'تاريخ آخر طمث — لحساب عمر الحمل', types: ['date'],   scope: 'visit' },
+      { v: 'sex',    label: 'جنس المريض — لمنحنيات النموّ',    types: ['select'], scope: 'patient' },
+      { v: 'weight', label: 'الوزن — لمنحنى النموّ',           types: ['number'], scope: 'visit' },
+      { v: 'height', label: 'الطول — لمنحنى النموّ',           types: ['number'], scope: 'visit' },
+      { v: 'hc',     label: 'محيط الرأس — لمنحنى النموّ',      types: ['number'], scope: 'visit' },
+      { v: 'bp',     label: 'ضغط الدم — لتصنيف الضغط',        types: ['text'],   scope: 'visit' },
+      // 👁 العينان: كل عين دور مستقلّ ليُرسما معاً على منحنى واحد فتُقارَنا مباشرةً
+      { v: 'va_od',  label: 'حدة الإبصار — العين اليمنى (OD)', types: ['text'],   scope: 'visit' },
+      { v: 'va_os',  label: 'حدة الإبصار — العين اليسرى (OS)', types: ['text'],   scope: 'visit' },
+      { v: 'iop_od', label: 'ضغط العين — اليمنى (OD)',        types: ['number'], scope: 'visit' },
+      { v: 'iop_os', label: 'ضغط العين — اليسرى (OS)',        types: ['number'], scope: 'visit' }
+    ];
+
+    function _cfRoleDef(role) {
+      if (!role) return null;
+      for (var i = 0; i < CF_ROLES.length; i++) if (CF_ROLES[i].v === role) return CF_ROLES[i];
+      return null;
+    }
+    // مصدر الحقيقة الوحيد: هل يجوز هذا الدور على حقل بهذا النوع وفي هذا الموضع؟
+    // يُستدعى عند الحفظ في المسارين (المخصِّص وشاشة الإعداد) فلا يمرّ دور غير صالح.
+    function _cfRoleAllowed(role, type, scope) {
+      var d = _cfRoleDef(role);
+      if (!d) return false;
+      if (d.types.indexOf(type) === -1) return false;
+      return !scope || d.scope === scope;
+    }
+    // الأدوار المعروضة لحقل بنوع/موضع معيّن — تُبنى منها القائمة في المحرِّرين
+    function _cfRolesFor(type, scope) {
+      return CF_ROLES.filter(function(r) {
+        return r.types.indexOf(type) !== -1 && (!scope || r.scope === scope);
+      });
+    }
+
+    // قوالب جاهزة حسب التخصص (وفق الممارسات السورية) — تُطبَّق ثم يعدّلها الطبيب
+    // ملاحظة: أُسقطت الحقول المكرّرة للحقول المدمجة أصلاً (زمرة الدم، الأمراض المزمنة)،
+    // وحقل رفع الصور (يحتاج تخزيناً خاصاً) — يمكن إضافتها يدوياً عند الحاجة.
+    var CHART_PRESETS = {
+      'نسائية': {
+        patient: [
+          { label: 'القصة التوليدية (GPA)', type: 'text' },
+          { label: 'عدد مرات الحمل (Gravida)', type: 'number' },
+          { label: 'عدد مرات الولادة (Parity)', type: 'number' },
+          { label: 'عدد الإسقاطات', type: 'number' },
+          { label: 'السوابق القيصرية', type: 'textarea' },
+          { label: 'وسائل منع الحمل المستخدمة', type: 'text' }
+        ],
+        visit: [
+          { label: 'تاريخ آخر طمث (LMP)', type: 'date', role: 'lmp' },
+          { label: 'موعد الولادة المتوقع (EDD)', type: 'date' },
+          { label: 'نتائج فحص عنق الرحم (Pap Smear)', type: 'textarea' },
+          { label: 'الفحص بالصدى (Echo)', type: 'textarea' }
+        ]
+      },
+      'أطفال': {
+        patient: [
+          // الجنس ضروري لمنحنيات النموّ (مرجع WHO مختلف للذكور والإناث)
+          { label: 'الجنس', type: 'select', options: ['ذكر', 'أنثى'], role: 'sex' },
+          { label: 'الوزن عند الولادة (كغ)', type: 'number' },
+          { label: 'نوع الولادة', type: 'select', options: ['طبيعية', 'قيصرية', 'أخرى'] },
+          { label: 'وجود اختناق ولادي', type: 'checkbox' },
+          { label: 'نوع الإرضاع', type: 'select', options: ['طبيعي', 'صناعي', 'مختلط'] },
+          { label: 'سجل اللقاحات', type: 'textarea' },
+          { label: 'اسم ولي الأمر', type: 'text' },
+          { label: 'رقم هاتف ولي الأمر', type: 'text' }
+        ],
+        visit: [
+          { label: 'التطور الروحي الحركي', type: 'textarea' },
+          { label: 'الوزن الحالي (كغ)', type: 'number', role: 'weight' },
+          { label: 'الطول الحالي (سم)', type: 'number', role: 'height' },
+          { label: 'محيط الرأس (سم)', type: 'number', role: 'hc' }
+        ]
+      },
+      'باطنية': {
+        patient: [
+          { label: 'عوامل الخطورة', type: 'textarea' }
+        ],
+        visit: [
+          { label: 'ضغط الدم (mmHg)', type: 'text', role: 'bp' },
+          { label: 'مستوى السكر في الدم (ملغ/دل)', type: 'number' },
+          { label: 'نتائج الفحوصات المخبرية', type: 'textarea' },
+          { label: 'نتائج الفحوصات الشعاعية', type: 'textarea' }
+        ]
+      },
+      'قلبية': {
+        patient: [
+          { label: 'تاريخ أمراض القلب', type: 'textarea' },
+          { label: 'الأدوية القلبية', type: 'textarea' }
+        ],
+        visit: [
+          { label: 'ضغط الدم (mmHg)', type: 'text', role: 'bp' },
+          { label: 'نتائج تخطيط القلب (ECG)', type: 'textarea' },
+          { label: 'نتائج إيكو القلب (Echo)', type: 'textarea' },
+          { label: 'اختبار الجهد', type: 'textarea' }
+        ]
+      },
+      'جلدية': {
+        patient: [
+          { label: 'تاريخ الأمراض الجلدية', type: 'textarea' },
+          { label: 'العلاجات الجلدية السابقة', type: 'textarea' },
+          { label: 'تاريخ التعرض للشمس', type: 'textarea' }
+        ],
+        visit: [
+          { label: 'وصف الآفة الجلدية', type: 'textarea' },
+          { label: 'توزع الآفة', type: 'text' },
+          { label: 'شكل الآفة الأولية', type: 'select', options: ['حطاطة', 'بثرة', 'حويصلة', 'فقاعة', 'بقعة', 'لويحة', 'عقدة', 'ورم'] },
+          { label: 'الحكة', type: 'checkbox' }
+        ]
+      },
+      'عظمية': {
+        patient: [
+          { label: 'تاريخ الإصابات العظمية', type: 'textarea' },
+          { label: 'العمليات الجراحية العظمية', type: 'textarea' }
+        ],
+        visit: [
+          { label: 'آلية الإصابة الحالية', type: 'textarea' },
+          { label: 'وصف الألم', type: 'textarea' },
+          { label: 'الوظيفة الحركية', type: 'textarea' },
+          { label: 'نتائج الأشعة', type: 'textarea' },
+          { label: 'العلاج الطبيعي', type: 'textarea' }
+        ]
+      },
+      'عيون': {
+        patient: [
+          { label: 'سوابق جراحة عينية', type: 'textarea' },
+          { label: 'استعمال عدسات لاصقة', type: 'select', options: ['لا', 'نهارية', 'ممتدة'] },
+          { label: 'تاريخ عائلي (ماء زرقاء/أمراض عينية)', type: 'textarea' }
+        ],
+        visit: [
+          // حدة الإبصار نصّ لأنها تُكتب كسراً (6/6، 6/12) أو عشرياً (1.0، 0.5) — كلاهما مقبول
+          { label: 'حدة الإبصار — اليمنى (OD)', type: 'text', role: 'va_od' },
+          { label: 'حدة الإبصار — اليسرى (OS)', type: 'text', role: 'va_os' },
+          { label: 'ضغط العين — اليمنى (mmHg)', type: 'number', role: 'iop_od' },
+          { label: 'ضغط العين — اليسرى (mmHg)', type: 'number', role: 'iop_os' },
+          // وصفة النظارة: نصّ لأن القيم تحمل إشارة وكسوراً ربعية (-2.25، +1.50)
+          { label: 'كروي Sph — اليمنى', type: 'text' },
+          { label: 'كروي Sph — اليسرى', type: 'text' },
+          { label: 'أسطواني Cyl — اليمنى', type: 'text' },
+          { label: 'أسطواني Cyl — اليسرى', type: 'text' },
+          { label: 'المحور Axis — اليمنى', type: 'number' },
+          { label: 'المحور Axis — اليسرى', type: 'number' },
+          { label: 'إضافة القرب (Add)', type: 'text' },
+          { label: 'فحص قعر العين', type: 'textarea' }
+        ]
+      },
+      'أسنان': {
+        patient: [
+          { label: 'حساسية أدوية', type: 'text' }
+        ],
+        visit: [
+          // «الشكوى» صارت حقلاً مدمجاً في محرّر الزيارة لكل التخصّصات — أُزيلت من هنا منعاً للتكرار
+
+          { label: 'موقع الألم', type: 'text' },
+          { label: 'مدة الألم', type: 'text' },
+          { label: 'شدة الألم', type: 'select', options: ['خفيف', 'متوسط', 'شديد'] },
+          { label: 'الحساسية (حار/بارد/حلو)', type: 'text' },
+          { label: 'حالة اللثة', type: 'select', options: ['طبيعية', 'التهاب', 'نزيف', 'انحسار'] },
+          { label: 'وجود تسوّس', type: 'select', options: ['لا يوجد', 'بسيط', 'متعدد'] },
+          { label: 'رائحة الفم', type: 'select', options: ['طبيعية', 'كريهة'] },
+          { label: 'حركة الأسنان', type: 'checkbox' },
+          { label: 'الإجراءات المنفّذة', type: 'textarea' },
+          { label: 'ملاحظات الفحص', type: 'textarea' },
+          { label: 'موعد المراجعة', type: 'date' }
+        ]
+      }
+    };
+
+    // يرجّع تعريف القالب الحالي بشكل سليم دائماً (يقرأ من الإعدادات المحمّلة)
+    function getChartTemplate() {
+      var t = (typeof settings !== 'undefined' && settings && settings.chartTemplate) || {};
+      return {
+        patient: Array.isArray(t.patient) ? t.patient : [],
+        visit:   Array.isArray(t.visit)   ? t.visit   : []
+      };
+    }
+    function _cfNewId() { return 'cf_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+    // تهريب قيمة سمة HTML (للاقتباس المزدوج)
+    function _cfAttr(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+    // ===== تجميع حقول القياسات حسب الجهاز (لمحرّر الزيارة) =====
+    // خريطة كلمات مفتاحية → مجموعة. المطابقة تقريبية؛ ما لا يُطابق يقع في «عامة».
+    var _VE_FIELD_GROUPS = [
+      ['نسائية وتوليدية', ['طمث','حيض','دورة شهر','حمل','ولاد','إجهاض','إسقاط','lmp','edd','gpa','pap','مسحة','عنق الرحم','رحم','مبيض','ثدي','رضاع','مخاض','جنين','نفاس','تبويض']],
+      ['قلبية', ['قلب','ضغط الدم','ecg','تخطيط القلب','إيكو','echo','نبض','خفقان','ذبحة','شريان','كوليسترول','دهون الدم','وذمة']],
+      ['تنفّسية', ['تنفّس','سعال','بلغم','ربو','رئة','أزيز','بخاخ','أكسج','spo2','إصغاء الصدر','ضيق النفس']],
+      ['بولية وكلوية', ['بول','كلية','تبوّل','psa','بروستات','حصى','كرياتينين','إدرار']],
+      ['غدد وسكري', ['سكر','غلوكوز','hba1c','a1c','درق','tsh','الغدة','أنسولين']],
+      ['عينية', ['إبصار','العين','قعر العين','iop','ضغط العين','sph','cyl','axis','عدسات','نظار','بؤبؤ']],
+      ['عصبية', ['صداع','دوخة','دوار','اختلاج','نوبة','الوعي','عصب','رعاش','خدر','توازن']],
+      ['جلدية', ['آفة','طفح','حكة','الجلد','بثرة','حويصلة','صداف','أكزيما','الشعر','الظفر']],
+      ['عظمية ومفصلية', ['مفصل','عظم','الظهر','الرقبة','الركبة','الكتف','كسر','الوظيفة الحركية','عضل','غضروف','قرص','فقرة','مشية']],
+      ['أسنان وفم', ['السن','الأسنان','اللثة','تسوّس','الفم','اللسان','مضغ','إطباق','خلع','حشو','رائحة الفم']],
+      ['هضمية', ['البطن','المعدة','قولون','إسهال','إمساك','غثيان','إقياء','الكبد','المرارة','بلع','حرقة','الشهية']]
+    ];
+    function _veFieldGroup(label) {
+      var s = String(label || '').toLowerCase();
+      for (var i = 0; i < _VE_FIELD_GROUPS.length; i++) {
+        var kws = _VE_FIELD_GROUPS[i][1];
+        for (var j = 0; j < kws.length; j++) { if (s.indexOf(kws[j]) !== -1) return _VE_FIELD_GROUPS[i][0]; }
+      }
+      return 'عامة';
+    }
+
+    // ===== توليد عناصر الإدخال من تعريف الحقول وملؤها بالقيم الحالية =====
+    // opts: { heading, variant }  — variant: 'form' (بطاقة المريض) | 'editor' (محرّر الزيارة)
+    function buildCustomFieldInputs(container, fields, values, opts) {
+      if (!container) return;
+      opts = (typeof opts === 'string') ? { heading: opts } : (opts || {});   // توافق خلفي مع توقيع (heading)
+      var variant = opts.variant || 'form';
+      container.innerHTML = '';
+      if (!fields || !fields.length) { container.style.display = 'none'; return; }
+      container.style.display = '';
+      values = values || {};
+      if (opts.heading) {
+        var h = document.createElement('div');
+        h.style.cssText = 'font-size:.8rem;font-weight:800;color:var(--primary);margin:2px 0 10px;';
+        h.textContent = opts.heading;
+        container.appendChild(h);
+      }
+      var labelCss = (variant === 'editor')
+        ? 'display:block;font-weight:700;font-size:.75rem;color:var(--text-secondary);margin-bottom:1px;'
+        : 'display:block;font-size:.8rem;font-weight:700;color:var(--text-secondary);margin-bottom:5px;';
+      var boxCss = 'width:100%;padding:7px 2px;background:transparent;border:none;border-bottom:1px solid var(--border);border-radius:0;color:var(--text-primary);font-family:inherit;font-size:.92rem;box-sizing:border-box;line-height:1.85;';
+      function styleInput(el, extra) {
+        if (variant === 'editor') {
+          el.style.cssText = boxCss + (extra || '');
+          el.addEventListener('focus', function() { el.style.borderBottomColor = 'var(--primary)'; });
+          el.addEventListener('blur', function() { el.style.borderBottomColor = 'var(--border)'; });
+        } else {
+          el.className = 'form-input'; if (extra) el.style.cssText = extra;
+        }
+      }
+      function hasVal(f) {
+        var v = values[f.id];
+        if (f.type === 'checkbox') return (v === true || v === 'true' || v === 'نعم');
+        return v != null && String(v).trim() !== '';
+      }
+      // يبني خلية حقل واحدة (عنصر <div>) ويضبط data-cfid/type على عنصر الإدخال
+      function makeCell(f) {
+        var cell = document.createElement('div');
+        var val = values[f.id];
+        var el;
+        if (f.type === 'textarea') {
+          cell.style.gridColumn = '1/-1';
+          var lblt = document.createElement('label'); lblt.style.cssText = labelCss; lblt.textContent = f.label || '(حقل)'; cell.appendChild(lblt);
+          el = document.createElement('textarea'); el.rows = 1;
+          styleInput(el, 'resize:none;overflow:hidden;line-height:1.7;min-height:0;');
+          el.value = (val != null ? val : '');
+          el.addEventListener('input', function() { veAutoGrow(el); });
+        } else if (f.type === 'checkbox') {
+          cell.style.cssText = (variant === 'editor')
+            ? 'display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;background:var(--bg);border:1.5px solid var(--border);border-radius:12px;'
+            : 'display:flex;align-items:center;justify-content:space-between;gap:10px;padding-top:22px;';
+          var lblc = document.createElement('span'); lblc.style.cssText = 'font-weight:700;font-size:.82rem;color:var(--text-primary);'; lblc.textContent = f.label || '(حقل)'; cell.appendChild(lblc);
+          el = document.createElement('input'); el.type = 'checkbox';
+          el.checked = (val === true || val === 'true' || val === 'نعم');
+          el.style.cssText = 'width:20px;height:20px;accent-color:var(--primary);cursor:pointer;flex-shrink:0;';
+        } else {
+          var lbl = document.createElement('label'); lbl.style.cssText = labelCss; lbl.textContent = f.label || '(حقل)'; cell.appendChild(lbl);
+          if (f.type === 'select') {
+            el = document.createElement('select'); styleInput(el);
+            var blank = document.createElement('option'); blank.value = ''; blank.textContent = '—'; el.appendChild(blank);
+            (f.options || []).forEach(function(o) {
+              var op = document.createElement('option'); op.value = o; op.textContent = o;
+              if (String(val) === String(o)) op.selected = true; el.appendChild(op);
+            });
+          } else {
+            el = document.createElement('input');
+            el.type = (f.type === 'number') ? 'number' : (f.type === 'date' ? 'date' : 'text');
+            styleInput(el); el.value = (val != null ? val : '');
+          }
+        }
+        el.setAttribute('data-cfid', f.id);
+        el.setAttribute('data-cftype', f.type);
+        if (variant === 'editor' && !hasVal(f)) cell.classList.add('ve-cf-empty');
+        cell.appendChild(el);
+        return cell;
+      }
+      function newGrid() {
+        var g = document.createElement('div');
+        g.className = 've-cf-grid';
+        g.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:6px 22px;align-items:start;';
+        return g;
+      }
+
+      // محرّر الزيارة وحقول كثيرة → مجموعات قابلة للطيّ حسب الجهاز
+      if (variant === 'editor' && fields.length > 6) {
+        var buckets = {};
+        fields.forEach(function(f) {
+          var g = _veFieldGroup(f.label);
+          (buckets[g] || (buckets[g] = [])).push(f);
+        });
+        var order = _VE_FIELD_GROUPS.map(function(x) { return x[0]; }).concat(['عامة']);
+        var visibleGroups = order.filter(function(g) { return buckets[g] && buckets[g].length; });
+        var anyValueAnywhere = fields.some(hasVal);
+        var _renderedFirst = false;
+        visibleGroups.forEach(function(gName) {
+          var gf = buckets[gName];
+          var anyVal = gf.some(hasVal);
+          var det = document.createElement('details');
+          det.className = 've-grp';
+          // افتح المجموعات ذات القيم؛ وإن كانت الزيارة فارغة تماماً افتح الأولى فقط
+          if (anyVal || visibleGroups.length === 1 || (!anyValueAnywhere && !_renderedFirst)) det.open = true;
+          _renderedFirst = true;
+          var sum = document.createElement('summary');
+          sum.className = 've-grp-h';
+          sum.innerHTML = '<span class="ve-grp-t">' + escapeHtml(gName) + '</span><span class="ve-grp-n">' + gf.length + '</span>';
+          det.appendChild(sum);
+          var grid = newGrid();
+          gf.forEach(function(f) { grid.appendChild(makeCell(f)); });
+          det.appendChild(grid);
+          det.addEventListener('toggle', function() { if (det.open) requestAnimationFrame(veGrowAll); });
+          container.appendChild(det);
+        });
+        return;
+      }
+
+      // غير ذلك: شبكة مسطّحة (سلوك سابق)
+      var grid0 = newGrid();
+      fields.forEach(function(f) { grid0.appendChild(makeCell(f)); });
+      container.appendChild(grid0);
+    }
+
+    // يقرأ القيم من الحاوية ويرجع كائن { fieldId: value } (يتجاهل الفارغ)
+    function readCustomFieldInputs(container) {
+      var out = {};
+      if (!container) return out;
+      Array.prototype.forEach.call(container.querySelectorAll('[data-cfid]'), function(el) {
+        var id = el.getAttribute('data-cfid'), type = el.getAttribute('data-cftype');
+        if (type === 'checkbox') { if (el.checked) out[id] = true; return; }
+        var v = el.value;
+        if (v != null && String(v).trim() !== '') out[id] = (type === 'number') ? Number(v) : v;
+      });
+      return out;
+    }
+
+    // ===== عرض القيم (قراءة فقط) =====
+    function _cfDisplayVal(f, val) {
+      if (f.type === 'checkbox') return val ? 'نعم' : '';       // لا نُظهر "لا" لتقليل الضجيج
+      if (f.type === 'date' && val) return formatDateAr(val);
+      return (val != null && String(val).trim() !== '') ? String(val) : '';
+    }
+    function _cfChip(label, valHtml, color) {
+      return '<div style="background:var(--bg);border:1.5px solid var(--border);border-radius:10px;padding:8px 11px;min-width:0;overflow:hidden;">'
+        + '<div style="font-size:.68rem;color:var(--text-muted);font-weight:600;margin-bottom:2px;">' + escapeHtml(label) + '</div>'
+        + '<div style="font-size:.86rem;font-weight:700;word-break:break-word;overflow-wrap:anywhere;color:' + (color || 'var(--text-primary)') + ';">' + (valHtml || '-') + '</div></div>';
+    }
+    // بطاقات حقول المريض المخصّصة (في رأس الاضبارة) — تُعرض فقط الحقول التي لها قيمة
+    function renderPatientCustomChips(custom) {
+      custom = custom || {};
+      return getChartTemplate().patient.map(function(f) {
+        var d = _cfDisplayVal(f, custom[f.id]);
+        return d === '' ? '' : _cfChip(f.label, escapeHtml(d));
+      }).join('');
+    }
+    // ===== 🩺 عناصر تصميم البروفايل (اضبارة المريض) =====
+    function _cfIsAllergy(f) { return /حساس|تحسس|allerg/i.test(f.label || ''); }
+    function _cfTypeIcon(type) {
+      return type === 'number' ? 'fa-hashtag' : type === 'date' ? 'fa-calendar-day'
+        : type === 'select' ? 'fa-list-ul' : type === 'checkbox' ? 'fa-circle-check' : 'fa-notes-medical';
+    }
+    function _pfPill(k, v, dotColor) {
+      return '<span class="pf-pill">' + (dotColor ? '<span class="dot" style="background:' + dotColor + '"></span>' : '')
+        + '<span class="k">' + escapeHtml(k) + '</span><span class="val num">' + v + '</span></span>';
+    }
+    /* الخانة الفارغة تقول ذلك بنصّها. الشرطة «-» كانت تُقرأ كأنها قيمة الحقل
+       نفسه (وفي العربية تلتبس بعلامة الطرح والفاصل)، ولا تفرّق بين «لم يُسجَّل
+       بعد» و«لا يوجد». والنصّ يُكتب بلون خافت كي لا ينافس القيم الحقيقية. */
+    function _pfTile(label, valHtml, opts) {
+      opts = opts || {};
+      var icon = opts.icon ? '<i class="fas ' + opts.icon + '"' + (opts.iconColor ? ' style="color:' + opts.iconColor + '"' : '') + '></i>' : '';
+      var empty = (valHtml == null || valHtml === '');
+      var vc = (!empty && opts.valColor) ? ' style="color:' + opts.valColor + '"' : '';
+      return '<div class="pf-tile' + (opts.full ? ' full' : '') + '"><span class="lab">' + icon + escapeHtml(label) + '</span>'
+        + '<span class="val' + (empty ? ' empty' : '') + '"' + vc + '>' + (empty ? 'غير مسجّل' : valHtml) + '</span></div>';
+    }
+    function _pfAllergy(custom) {
+      custom = custom || {};
+      return getChartTemplate().patient.filter(_cfIsAllergy).map(function(f) {
+        var d = _cfDisplayVal(f, custom[f.id]);
+        return d === '' ? '' : '<div class="pf-alertline"><span class="pf-alerttag">تنبيه</span>'
+          + '<span class="pf-alerttext"><b>' + escapeHtml(f.label) + ':</b> ' + escapeHtml(d) + '</span></div>';
+      }).join('');
+    }
+    function renderPatientCustomTiles(custom) {
+      custom = custom || {};
+      return getChartTemplate().patient.filter(function(f) { return !_cfIsAllergy(f); }).map(function(f) {
+        var d = _cfDisplayVal(f, custom[f.id]);
+        return d === '' ? '' : _pfTile(f.label, escapeHtml(d), { icon: _cfTypeIcon(f.type) });
+      }).join('');
+    }
+    /* شريط رأس الاضبارة — تنبيهات الخطر فقط.
+       كان يعرض العمر/الزمرة/الزيارات/الميلاد/العنوان، وكلها مكرّرة حرفياً في بطاقة
+       «معلومات المريض» أسفله: خمس شارات بصفر معلومة جديدة. صار مكانها للحساسية
+       والأمراض المزمنة — أخطر ما يجب أن يراه الطبيب أولاً. وإن لم يوجد خطر،
+       يُرجع نصاً فارغاً فينكمش الشريط ويختفي. */
+    function renderChartHeaderPills(p) {
+      var custom = (p && p.custom) || {}, out = '';
+      try {
+        getChartTemplate().patient.filter(_cfIsAllergy).forEach(function(f) {
+          var d = _cfDisplayVal(f, custom[f.id]);
+          if (d !== '') out += _pfPill(f.label, escapeHtml(d), '#dc2626');
+        });
+      } catch (e) {}
+      var chronic = (p && p.chronicDiseases || '').trim();
+      if (chronic) out += _pfPill('مزمن', escapeHtml(chronic), '#d97706');
+      return out;
+    }
+    function renderChartInfoTiles(p) {
+      var age = p.birthDate ? calculateAge(p.birthDate) : null;
+      var visits = String(p.totalVisits || (p.appointments ? p.appointments.length : 0));
+      return _pfAllergy(p.custom)
+        + _pfTile('رقم الهاتف', p.phone ? '<span dir="ltr">' + escapeHtml(p.phone) + '</span>' : '', { icon: 'fa-phone' })
+        + _pfTile('تاريخ الميلاد', p.birthDate ? formatDateAr(p.birthDate) : '', { icon: 'fa-calendar-day' })
+        + _pfTile('العمر', age != null ? age + ' سنة' : '', { icon: 'fa-hourglass-half' })
+        + _pfTile('زمرة الدم', p.bloodType ? escapeHtml(p.bloodType) : '', { icon: 'fa-droplet', iconColor: '#dc2626', valColor: '#dc2626' })
+        + _pfTile('العنوان', p.address ? escapeHtml(p.address) : '', { icon: 'fa-location-dot' })
+        + _pfTile('إجمالي الزيارات', visits, { icon: 'fa-clock-rotate-left' })
+        + renderPatientCustomTiles(p.custom)
+        + _pfTile('أمراض مزمنة', escapeHtml(p.chronicDiseases || 'لا يوجد'), { full: true, icon: 'fa-heart-pulse', iconColor: '#d97706', valColor: p.chronicDiseases ? '#d97706' : 'var(--text-muted)' });
+    }
+    // شبكة حقول الزيارة المخصّصة (داخل بطاقة الزيارة في الأرشيف)
+    function renderVisitCustomHtml(custom) {
+      custom = custom || {};
+      var items = getChartTemplate().visit.map(function(f) {
+        var d = _cfDisplayVal(f, custom[f.id]);
+        if (d === '') return '';
+        return '<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:6px 9px;min-width:0;">'
+          + '<div style="font-size:.66rem;color:var(--text-muted);font-weight:600;margin-bottom:2px;">' + escapeHtml(f.label) + '</div>'
+          + '<div style="font-size:.82rem;font-weight:700;color:var(--text-primary);word-break:break-word;">' + escapeHtml(d) + '</div></div>';
+      }).filter(Boolean);
+      if (!items.length) return '';
+      return '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-top:12px;">' + items.join('') + '</div>';
+    }
+
+    /* ============================================================
+       ★ الأداة السريرية لكل تخصّص — بطاقة في اضبارة المريض
+       ------------------------------------------------------------
+       لا كود خاص بكل تخصّص: تقرأ getChartTemplate().visit وتقرّر شكل
+       العرض من نوع كل حقل — رقم(منحنى) · نص"رقم/رقم"(منحنيان) ·
+       قائمة(شرائح) · تاريخ role=lmp(بطاقة حمل مشتقّة) · الباقي(جدول).
+       تعمل مع أي حقل يضيفه الطبيب بنفسه، لا فقط قوالب CHART_PRESETS.
+       ============================================================ */
+
+    // تسميات مختصرة (يوم/شهر) لنقاط الرسم — formatDateAr مطوّل جداً لنقطة صغيرة.
+    // تضيف السنة تلقائياً لكل التسميات فقط إن تصادم يوم/شهر بين تاريخين مختلفين (نادر، كزيارتين بفارق سنة)
+    function _scShortDate(iso) {
+      if (!iso) return '';
+      var d = parseLocalISODate(iso);
+      return d.toLocaleDateString('ar-EG', { day: 'numeric', month: 'numeric' });
+    }
+    function _scDateLabels(isoDates) {
+      var plain = isoDates.map(_scShortDate);
+      var seen = {}, dup = false;
+      plain.forEach(function(l) { if (seen[l]) dup = true; seen[l] = true; });
+      if (!dup) return plain;
+      return isoDates.map(function(iso) {
+        var d = parseLocalISODate(iso);
+        return d.toLocaleDateString('ar-EG', { day: 'numeric', month: 'numeric', year: '2-digit' });
+      });
+    }
+
+    var _SC_ICONS = {
+      pregnancy: '<circle cx="12" cy="13" r="7.2"/><path d="M7.6 13h2l1.3-2.7 1.7 5.2 1-2.5h2.6"/>',
+      baby:      '<path d="M4 19V9M9.5 19V6M15 19V10M20 19v-5"/><circle cx="4" cy="6" r="1.4"/><circle cx="9.5" cy="3" r="1.4"/><circle cx="15" cy="7" r="1.4"/><circle cx="20" cy="11" r="1.4"/>',
+      pulse:     '<path d="M3 12h4l2-7 4 14 2-7h6"/>',
+      heart:     '<path d="M12 20.5s-7.5-4.6-9.7-9.4C.7 7.6 2.3 4 5.8 3.4 8.1 3 10.4 4.1 12 6.4 13.6 4.1 15.9 3 18.2 3.4c3.5.6 5.1 4.2 3.5 7.7C19.5 15.9 12 20.5 12 20.5Z"/>',
+      lens:      '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/><circle cx="10.5" cy="10.5" r="1.6"/>',
+      rom:       '<path d="M6 18l6-6 6 3"/><path d="M12 12V6.6" stroke-dasharray="2.3 2.3" opacity=".55"/><path d="M9.6 11.2a3.3 3.3 0 0 0 2 3.6"/>',
+      eye:       '<path d="M2.2 12S5.8 5.6 12 5.6 21.8 12 21.8 12 18.2 18.4 12 18.4 2.2 12 2.2 12Z"/><circle cx="12" cy="12" r="3.1"/>'
+    };
+    function _scIcon(name) {
+      return '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" ' +
+        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (_SC_ICONS[name] || _SC_ICONS.pulse) + '</svg>';
+    }
+    // يحدّد أيقونة/عنوان البطاقة حسب تخصّص الطبيب — بنفس أسلوب مطابقة _dentalEnabled التقريبية
+    function _scSpecialtyMeta() {
+      var sp = (typeof settings !== 'undefined' && settings && settings.specialty) || '';
+      if (/نسائ|توليد/.test(sp))            return { icon: 'pregnancy', title: 'متابعة الحمل' };
+      if (/أطفال|اطفال/.test(sp))           return { icon: 'baby',      title: 'مخطّط النمو' };
+      if (/قلب/.test(sp))                    return { icon: 'heart',     title: 'سجلّ الفحوص القلبية' };
+      if (/عيون|عين|بصر/.test(sp))           return { icon: 'eye',       title: 'متابعة البصر' };
+      if (/عيون|عين|بصر/.test(sp))           return { icon: 'eye',       title: 'متابعة البصر' };
+      if (/جلد/.test(sp))                    return { icon: 'lens',      title: 'مقارنة القياسات' };
+      if (/عظم|عظام/.test(sp))               return { icon: 'rom',       title: 'مقارنة القياسات' };
+      return { icon: 'pulse', title: 'مقارنة القياسات' };   // باطنية وأي تخصّص آخر
+    }
+
+    // نفس تقنية مخطّط «توزيع الأيام» في الرئيسية (منحنى Catmull-Rom ناعم + توهّج + تعبئة متدرّجة) —
+    // مكرَّرة محلياً هنا لأن _homeSmoothPath مغلقة داخل renderHomeWidgets ولا يمكن استدعاؤها من خارجها.
+    function _scSmoothPath(p) {
+      if (!p.length) return '';
+      if (p.length === 1) return 'M ' + p[0].x + ' ' + p[0].y;
+      var d = 'M ' + p[0].x.toFixed(1) + ' ' + p[0].y.toFixed(1);
+      for (var i = 0; i < p.length - 1; i++) {
+        var p0 = p[i - 1] || p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] || p2;
+        var c1x = p1.x + (p2.x - p0.x) / 6, c1y = p1.y + (p2.y - p0.y) / 6;
+        var c2x = p2.x - (p3.x - p1.x) / 6, c2y = p2.y - (p3.y - p1.y) / 6;
+        d += ' C ' + c1x.toFixed(1) + ' ' + c1y.toFixed(1) + ', ' + c2x.toFixed(1) + ' ' + c2y.toFixed(1) + ', ' + p2.x.toFixed(1) + ' ' + p2.y.toFixed(1);
+      }
+      return d;
+    }
+    var _scUidSeq = 0;
+
+    // منحنى بهوية «توزيع الأيام» نفسها: لا محور شبكي ولا أرقام جانبية (مصدر تصادم التسميات) —
+    // القيمة تُكتب فوق نقطتها مباشرة والتاريخ تحتها. RTL: الزيارة الأقدم يميناً، الأحدث يساراً.
+    function _scLineChart(cfg) {
+      var W = 300, H = 150, padX = 16, padTop = 30, padBot = 26;
+      var innerW = W - padX * 2, innerH = H - padTop - padBot;
+      var n = cfg.labels.length;
+      var all = []; cfg.series.forEach(function(s) { all = all.concat(s.v); });
+      // النطاق المرجعي يدخل في حساب المقياس، وإلا خرج خارج الإطار فلم يُرَ
+      if (cfg.band) all = all.concat([cfg.band.from, cfg.band.to]);
+      var mn = Math.min.apply(null, all), mx = Math.max.apply(null, all);
+      var pad = (mx - mn) * 0.22 || 1; mn -= pad; mx += pad;
+      var X = function(i) { return padX + (n < 2 ? innerW / 2 : ((n - 1 - i) / (n - 1)) * innerW); };   // يمين=الأقدم
+      var Y = function(v) { return padTop + innerH - ((v - mn) / (mx - mn)) * innerH; };
+
+      var uid = 'sc' + (_scUidSeq++);
+      var single = cfg.series.length === 1;
+      var defs = '<defs>' +
+        '<filter id="' + uid + 'g" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur in="SourceGraphic" stdDeviation="2.6" result="b1"/><feGaussianBlur in="SourceGraphic" stdDeviation="6" result="b2"/><feMerge><feMergeNode in="b2"/><feMergeNode in="b1"/><feMergeNode in="SourceGraphic"/></feMerge></filter>' +
+        (single ? '<linearGradient id="' + uid + 'f" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="' + cfg.series[0].color + '" stop-opacity=".26"/><stop offset="65%" stop-color="' + cfg.series[0].color + '" stop-opacity=".05"/><stop offset="100%" stop-color="' + cfg.series[0].color + '" stop-opacity="0"/></linearGradient>' : '') +
+        '</defs>';
+
+      // شريط النطاق الطبيعي خلف المنحنى — هو ما يحوّل الرقم إلى معنى سريري
+      var paths = '', overlay = '';
+      if (cfg.band) {
+        var by1 = Y(cfg.band.to), by2 = Y(cfg.band.from);
+        paths += '<rect x="0" y="' + by1.toFixed(1) + '" width="' + W + '" height="' + Math.abs(by2 - by1).toFixed(1) +
+          '" fill="var(--primary)" opacity=".07"></rect>' +
+          '<line x1="0" y1="' + by1.toFixed(1) + '" x2="' + W + '" y2="' + by1.toFixed(1) +
+            '" stroke="var(--primary)" stroke-width="1" stroke-dasharray="4 3" opacity=".55"></line>' +
+          '<line x1="0" y1="' + by2.toFixed(1) + '" x2="' + W + '" y2="' + by2.toFixed(1) +
+            '" stroke="var(--primary)" stroke-width="1" stroke-dasharray="4 3" opacity=".55"></line>';
+        // تسمية حدّي النطاق على الحافّة — بدونها الشريط لون بلا معنى
+        overlay += '<span style="position:absolute;right:2px;top:' + ((by1 / H) * 100).toFixed(1) +
+            '%;transform:translateY(-115%);font-size:.6rem;font-weight:800;color:var(--primary);">' + cfg.band.to + '</span>' +
+          '<span style="position:absolute;right:2px;top:' + ((by2 / H) * 100).toFixed(1) +
+            '%;transform:translateY(15%);font-size:.6rem;font-weight:800;color:var(--primary);">' + cfg.band.from + '</span>';
+      }
+      var lifted = cfg.series.map(function(s) { return s.color; });   // لوح فاتح ⇒ الألوان كما هي
+      cfg.series.forEach(function(s, si) {
+        var col = s.color;
+        var pts = s.v.map(function(v, i) { return { x: X(i), y: Y(v) }; });
+        var line = _scSmoothPath(pts);
+        if (single) {
+          var area = line + ' L ' + pts[pts.length - 1].x.toFixed(1) + ' ' + H + ' L ' + pts[0].x.toFixed(1) + ' ' + H + ' Z';
+          paths += '<path d="' + area + '" fill="url(#' + uid + 'f)"></path>';
+        }
+        // خطّ واحد حادّ بلا توهّج: القيمة قرب حدّ النطاق المرجعي يجب أن تُقرأ بدقّة
+        paths += '<path d="' + line + '" fill="none" stroke="' + col + '" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>';
+        pts.forEach(function(pt, i) {
+          var leftPct = (pt.x / W) * 100, topPct = (pt.y / H) * 100;
+          overlay += '<span class="scc-dot" data-s="' + si + '" data-i="' + i + '" style="left:' + leftPct + '%;top:' + topPct +
+            '%;background:' + col + ';"></span>';
+        });
+      });
+
+      // بيانات التلميح: لكل نقطة تاريخها وقيمها في كل السلاسل
+      var tipData = cfg.labels.map(function(l, i) {
+        return { d: l, v: cfg.series.map(function(s) { return { n: s.n || cfg.title, x: s.v[i] }; }) };
+      });
+
+      var dateLabels = '', hits = '';
+      cfg.labels.forEach(function(l, i) {
+        var leftPct = (X(i) / W) * 100;
+        dateLabels += '<span class="scc-x" data-i="' + i + '" style="left:' + leftPct + '%;">' + escapeHtml(l) + '</span>';
+        hits += '<button type="button" class="scc-hit" data-i="' + i + '" style="left:' + leftPct + '%;" aria-label="' + escapeHtml(l) + '"></button>';
+      });
+
+      var leg = '';
+      if (cfg.series.length > 1) {
+        leg = '<div class="scc-legend">' + cfg.series.map(function(s, si) {
+          return '<span><i style="background:' + lifted[si] + '"></i>' + escapeHtml(s.n) + '</span>';
+        }).join('') + '</div>';
+      }
+
+      // القيمة المعروضة في الترويسة = آخر قياس (أحدث زيارة)
+      var lastIdx = 0;   // ترتيب المحور: يمين = الأقدم ⇒ الفهرس ٠ هو الأحدث
+      var headVal = cfg.series.map(function(s) { return s.v[lastIdx]; }).join(' / ');
+      var count = cfg.labels.length;
+
+      return '<div class="scc" data-tip=\'' + escapeHtml(JSON.stringify(tipData)) + '\'>' +
+        '<div class="scc-head">' +
+          '<div><p class="scc-t">' + escapeHtml(cfg.title) + '</p>' +
+            '<p class="scc-v">' + escapeHtml(String(headVal)) + '</p>' +
+            '<p class="scc-u">' + escapeHtml(cfg.unit || '') + '</p></div>' +
+          '<span class="scc-pill"><i></i>' + count + ' قياس</span>' +
+        '</div>' + leg +
+        '<div class="scc-plot">' +
+          '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="100%" preserveAspectRatio="none" style="position:absolute;inset:0;overflow:visible;">' + defs + paths + '</svg>' +
+          '<span class="scc-guide"></span>' + overlay + dateLabels + hits +
+          '<div class="scc-tip"></div>' +
+        '</div></div>';
+    }
+
+    /* تفاعل بطاقات القياس: لمس/مرور على نقطة ⇒ خطّ دليل + تلميح بالتاريخ والقيمة.
+       مفوَّض على المستند مرّة واحدة، فيعمل مع أي بطاقة تُرسَم لاحقاً. */
+    (function _scTipInit() {
+      function show(card, i) {
+        var tip = card.querySelector('.scc-tip'), guide = card.querySelector('.scc-guide');
+        var hit = card.querySelector('.scc-hit[data-i="' + i + '"]');
+        if (!tip || !hit) return;
+        var data;
+        try { data = JSON.parse(card.getAttribute('data-tip') || '[]'); } catch (e) { return; }
+        var d = data[i]; if (!d) return;
+        tip.innerHTML = '<b>' + escapeHtml(d.d) + '</b>' + d.v.map(function(o) {
+          return '<div class="r"><span>' + escapeHtml(o.n) + '</span><em>' + escapeHtml(String(o.x)) + '</em></div>';
+        }).join('');
+        var left = hit.style.left;
+        tip.style.left = left; guide.style.left = left;
+        // أعلى نقطة في هذا الفهرس ⇒ التلميح فوقها
+        var dots = card.querySelectorAll('.scc-dot[data-i="' + i + '"]');
+        var top = 100;
+        dots.forEach(function(dt) { var t = parseFloat(dt.style.top); if (t < top) top = t; });
+        tip.style.top = top + '%';
+        tip.style.display = 'block'; guide.style.display = 'block';
+        card.querySelectorAll('.scc-dot').forEach(function(dt) { dt.classList.toggle('on', dt.getAttribute('data-i') === String(i)); });
+        card.querySelectorAll('.scc-x').forEach(function(x) { x.classList.toggle('on', x.getAttribute('data-i') === String(i)); });
+      }
+      function hide(card) {
+        var tip = card.querySelector('.scc-tip'), guide = card.querySelector('.scc-guide');
+        if (tip) tip.style.display = 'none';
+        if (guide) guide.style.display = 'none';
+        card.querySelectorAll('.scc-dot.on').forEach(function(d) { d.classList.remove('on'); });
+        card.querySelectorAll('.scc-x.on').forEach(function(x) { x.classList.remove('on'); });
+      }
+      document.addEventListener('pointerover', function(e) {
+        var hit = e.target.closest && e.target.closest('.scc-hit');
+        if (!hit) return;
+        show(hit.closest('.scc'), hit.getAttribute('data-i'));
+      });
+      document.addEventListener('pointerout', function(e) {
+        var card = e.target.closest && e.target.closest('.scc');
+        if (card && !(e.relatedTarget && card.contains(e.relatedTarget))) hide(card);
+      });
+      // اللمس: ضغطة تُظهر، وضغطة خارج البطاقة تُخفي
+      document.addEventListener('click', function(e) {
+        var hit = e.target.closest && e.target.closest('.scc-hit');
+        if (hit) { show(hit.closest('.scc'), hit.getAttribute('data-i')); return; }
+        document.querySelectorAll('.scc').forEach(function(c) { if (!c.contains(e.target)) hide(c); });
+      });
+    })();
+
+    // جدول مقارنة عام: يجمع كل الحقول غير القابلة للرسم (نصّ/نصّ طويل/نعم-لا) عموداً فعموداً عبر الزيارات
+    function _scTable(cols, rows) {
+      // الجدول يُغلَّف دوماً بصندوق var(--bg) (_scBuildBody) — فترويسته تستعمل var(--surface) لتتباين عنه.
+      // عمود «الزيارة» لاصق (sticky) أثناء التمرير الأفقي كي يبقى التاريخ مرجعاً مرئياً.
+      // حشوة أوسع وخطّ أكبر ورأس أثقل — الجدول يُقرأ بالمسح السريع لا بالتدقيق
+      var thB = 'padding:11px 13px;text-align:start;font-size:.76rem;font-weight:800;color:var(--text-primary);background:var(--bg);white-space:nowrap;border-bottom:2px solid var(--border-strong);';
+      var head = '<tr><th style="' + thB + 'position:sticky;inset-inline-start:0;z-index:3;">الزيارة</th>' +
+        cols.map(function(c) { return '<th style="' + thB + '">' + escapeHtml(c) + '</th>'; }).join('') + '</tr>';
+      var body = rows.map(function(r) {
+        return '<tr class="sc-row"><td style="padding:11px 13px;font-size:.83rem;font-weight:800;color:var(--primary);white-space:nowrap;border-top:1px solid var(--border);background:var(--surface);position:sticky;inset-inline-start:0;z-index:1;">' + escapeHtml(r.date) + '</td>' +
+          r.vals.map(function(v) {
+            var empty = !v;
+            return '<td style="padding:11px 13px;font-size:.83rem;line-height:1.6;color:' + (empty ? 'var(--text-muted)' : 'var(--text-primary)') +
+              ';border-top:1px solid var(--border);background:var(--surface);max-width:220px;">' + escapeHtml(v || '—') + '</td>';
+          }).join('') + '</tr>';
+      }).join('');
+      return '<div style="overflow-x:auto;border:1.5px solid var(--border);border-radius:12px;">' +
+        '<table style="width:100%;border-collapse:collapse;min-width:420px;"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>';
+    }
+
+    /* ── 👁 كتلة العينين ──
+       حدة الإبصار وضغط العين: العينان على منحنى واحد بلونين، فيُقارَنان مباشرةً
+       ويظهر تراجعُ إحداهما فوراً. تُقرأ الحقول بأدوارها لا بأسمائها. */
+
+    // حدة الإبصار تُكتب كسراً (6/6، 6/12، 20/40) أو عشرياً (1.0، 0.5) — كلاهما يؤول إلى كسر عشري
+    function _scParseVA(s) {
+      s = String(s == null ? '' : s).trim();
+      if (!s) return null;
+      var m = /^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/.exec(s);
+      if (m) { var den = parseFloat(m[2]); return den > 0 ? parseFloat(m[1]) / den : null; }
+      var n = parseFloat(s.replace(',', '.'));
+      return (isFinite(n) && n >= 0 && n <= 2) ? n : null;   // نطاق الكسر العشري المعقول
+    }
+    function _scParseNum(s) { var n = parseFloat(String(s).replace(',', '.')); return isFinite(n) ? n : null; }
+
+    // قيم دورانية (زاوية ٠–١٨٠): اتجاهها الزمني بلا معنى سريري — تُقارَن في الجدول لا بمنحنى
+    var _SC_NO_CHART = /محور|axis/i;
+
+    // يوائم قياسي العينين على تواريخ مشتركة (تُقاسان في الزيارة نفسها عادةً)
+    function _scEyePair(visits, fOD, fOS, parse) {
+      var mapOD = {}, mapOS = {};
+      if (fOD) _scFieldSeries(visits, fOD.id).forEach(function(x) { var v = parse(x.value); if (v != null) mapOD[x.date] = v; });
+      if (fOS) _scFieldSeries(visits, fOS.id).forEach(function(x) { var v = parse(x.value); if (v != null) mapOS[x.date] = v; });
+      var hasOD = Object.keys(mapOD).length, hasOS = Object.keys(mapOS).length, dates;
+      if (hasOD && hasOS) dates = Object.keys(mapOD).filter(function(d) { return Object.prototype.hasOwnProperty.call(mapOS, d); });
+      else if (hasOD) { dates = Object.keys(mapOD); fOS = null; }
+      else if (hasOS) { dates = Object.keys(mapOS); fOD = null; }
+      else return null;
+      dates.sort();
+      if (dates.length < 2) return null;   // نقطة واحدة لا تُظهر اتجاهاً
+      var series = [];
+      if (fOD) series.push({ n: 'اليمنى (OD)', color: 'var(--primary)',         v: dates.map(function(d) { return mapOD[d]; }) });
+      if (fOS) series.push({ n: 'اليسرى (OS)', color: 'var(--chart-accent-2)',  v: dates.map(function(d) { return mapOS[d]; }) });
+      return { labels: _scDateLabels(dates), series: series };
+    }
+
+    /* بطاقة «لم تُسجَّل بعد» — تحتلّ خلية الشبكة نفسها بحدود متقطّعة.
+       قرار مقصود: الخانة غير المعبّأة لا تُرسم صفراً. الصفر رقم حقيقي والفراغ ليس صفراً —
+       ضغط عين 0 mmHg يعني عيناً منتهية، ووزن 0 كغ مستحيل، والمنحنى سيهوي في كل زيارة
+       غير معبّأة فيبدو المريض متدهوراً وهو بخير. تلفيق البيانات في سجلّ طبّي غير مقبول. */
+    function _scEmptyCard(title, note) {
+      return '<div style="background:var(--bg);border:1px dashed var(--border);border-radius:14px;padding:14px;height:100%;min-height:140px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;gap:6px;">' +
+        '<b style="font-size:.85rem;font-weight:700;color:var(--text-primary);">' + escapeHtml(title) + '</b>' +
+        '<span style="font-size:.76rem;color:var(--text-muted);line-height:1.65;">' + escapeHtml(note) + '</span>' +
+      '</div>';
+    }
+    // نصّ الحالة حسب عدد القياسات المتاحة
+    function _scEmptyNote(count, lastVal) {
+      if (!count) return 'لم تُسجَّل بعد';
+      return 'قياس واحد فقط (' + lastVal + ') — يلزم قياسان لرسم المنحنى';
+    }
+
+    // يبني بطاقتي العينين (منحنى أو حالة فارغة) ويسجّل الحقول المستهلَكة كي لا يعيدها المحرّك العام
+    function _scEyeBlock(visits, fields, consumed, state) {
+      function byRole(r) {
+        for (var i = 0; i < fields.length; i++) if (fields[i].role === r) return fields[i];
+        return null;
+      }
+      var cards = [];
+      [
+        { od: 'va_od',  os: 'va_os',  parse: _scParseVA,  title: 'حدة الإبصار',
+          unit: 'كسر عشري — 1.0 إبصار تام', band: null },
+        { od: 'iop_od', os: 'iop_os', parse: _scParseNum, title: 'ضغط العين',
+          unit: 'mmHg — النطاق الطبيعي ١٠–٢١', band: { from: 10, to: 21 } }
+      ].forEach(function(cfg) {
+        var fOD = byRole(cfg.od), fOS = byRole(cfg.os);
+        if (!fOD && !fOS) return;
+        // تُستهلَك دائماً — حتى بلا قياسات كافية — فلا يلتقطها فرع ضغط الدم أو الجدول
+        if (fOD) consumed[fOD.id] = 1;
+        if (fOS) consumed[fOS.id] = 1;
+
+        var pair = _scEyePair(visits, fOD, fOS, cfg.parse);
+        if (pair) {
+          state.hasData = true;
+          cards.push(_scLineChart({ title: cfg.title, unit: cfg.unit, labels: pair.labels, series: pair.series, band: cfg.band }));
+          return;
+        }
+        // بلا قياسين مشتركين: بطاقة حالة توضّح ما ينقص لكل عين
+        var nOD = fOD ? _scFieldSeries(visits, fOD.id).length : 0;
+        var nOS = fOS ? _scFieldSeries(visits, fOS.id).length : 0;
+        var note = (!nOD && !nOS) ? 'لم تُسجَّل بعد'
+          : 'القياسات غير مكتملة (اليمنى ' + nOD + ' · اليسرى ' + nOS + ') — يلزم قياسان في زيارتين لكلتا العينين';
+        cards.push(_scEmptyCard(cfg.title, note));
+      });
+      return cards;
+    }
+
+    // يستخرج {date,value} لحقل واحد عبر الزيارات المرتّبة تصاعدياً، متجاهلاً الفراغ
+    function _scFieldSeries(visits, fieldId) {
+      var out = [];
+      visits.forEach(function(v) {
+        var raw = v.custom && v.custom[fieldId];
+        var s = (raw == null) ? '' : String(raw).trim();
+        if (s !== '') out.push({ date: v.date, value: s });
+      });
+      return out;
+    }
+
+    // يبني محتوى الأداة السريرية (بلا غلاف بطاقة/رأس — المودال في specialtyToolModal يوفّرهما) أو '' إن لم توجد بيانات كافية.
+    // مستقلّة عن أي عنصر DOM لتُستعمل مرّتين: فحص إظهار الزر، وتعبئة جسم المودال عند الفتح.
+    function _scBuildBody(pid) {
+      var p = allPatients[pid];
+      if (!p) return '';
+
+      var visits = (p.appointments || []).filter(function(v) { return v.date; })
+        .sort(function(a, b) { return (a.date || '').localeCompare(b.date || ''); });   // تصاعدي: عكس ترتيب الأرشيف النازل
+      var fields = getChartTemplate().visit;
+
+      var lmpBlock = '', cards = [], tableCols = [], tableRows = null;
+      // hasData يفصل «بيانات حقيقية» عن «بطاقات فارغة»: الزرّ في رأس الأرشيف يظهر
+      // بالأولى فقط، وإلا ظهر لكل مريض بلا قياس واحد لمجرّد وجود خانات في القالب.
+      var state = { hasData: false };
+
+      // 👁 العينان أولاً: تُقرأ بالأدوار وتُستهلَك حقولها قبل أي تخمين من النوع أو الصيغة.
+      // حاسم: حدة الإبصار «6/12» تطابق نمط ضغط الدم أدناه، فلولا الاستهلاك المسبق
+      // لرُسمت كمنحنيَي «الرقم الأول/الثاني» — خطأ سريري صريح.
+      var consumed = {};
+      cards = cards.concat(_scEyeBlock(visits, fields, consumed, state));
+
+      fields.forEach(function(f) {
+        if (consumed[f.id]) return;
+        var series = _scFieldSeries(visits, f.id);
+
+        if (f.type === 'date' && f.role === 'lmp') {
+          if (!series.length) return;
+          var lmp = parseLocalISODate(series[series.length - 1].value);
+          var today = new Date();
+          var gestDays = Math.round((today - lmp) / 86400000);
+          var gestWeeks = Math.floor(gestDays / 7);
+          if (gestWeeks < 0 || gestWeeks > 44) return;   // بيانات غير منطقية — لا نعرض رقماً مضلّلاً
+          state.hasData = true;
+          var edd = new Date(lmp.getTime() + 280 * 86400000);
+          var tri = gestWeeks < 13 ? 'الأول' : (gestWeeks < 27 ? 'الثاني' : 'الثالث');
+          var fmt = function(d) { return d.toLocaleDateString('ar-EG', { day: 'numeric', month: 'long' }); };
+          // بطاقة الحمل بنفس هوية «قسم لحاله» — صندوق مستقلّ كبقية العناصر، لا كتلة عائمة بلا حدود
+          lmpBlock = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:12px;">' +
+            '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;">' +
+              '<div style="background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:11px 13px;"><div style="font-size:.7rem;color:var(--text-muted);margin-bottom:4px;">عمر الحمل</div><div style="font-size:1.05rem;font-weight:800;color:var(--text-primary);">' + Math.floor(gestWeeks) + ' أسبوع</div></div>' +
+              '<div style="background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:11px 13px;"><div style="font-size:.7rem;color:var(--text-muted);margin-bottom:4px;">الثلث</div><div style="font-size:1.05rem;font-weight:800;color:var(--text-primary);">' + tri + '</div></div>' +
+              '<div style="background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:11px 13px;"><div style="font-size:.7rem;color:var(--text-muted);margin-bottom:4px;">الولادة المتوقّعة</div><div style="font-size:1.05rem;font-weight:800;color:var(--text-primary);">' + fmt(edd) + '</div></div>' +
+            '</div>' +
+            '<div style="font-size:.74rem;color:var(--text-muted);margin-top:9px;">محسوبة تلقائياً من «' + escapeHtml(f.label) + '» — لا تُدخَل يدوياً.</div>' +
+          '</div>';
+          return;
+        }
+
+        // كل حقل رقمي يستحقّ خلية في الشبكة — بمنحنى إن كفت القياسات، وإلا ببطاقة حالة.
+        // يُستثنى المحور Axis: زاوية ٠–١٨٠ اتجاهها الزمني بلا معنى سريري، فمكانها الجدول.
+        if (f.type === 'number' && !_SC_NO_CHART.test(f.label || '')) {
+          var nums = series.map(function(s) { return parseFloat(s.value); });
+          if (series.length >= 2 && !nums.some(isNaN)) {
+            state.hasData = true;
+            cards.push(_scLineChart({
+              title: f.label, unit: '', labels: _scDateLabels(series.map(function(s) { return s.date; })),
+              series: [{ n: f.label, color: 'var(--primary)', v: nums }]
+            }));
+            return;
+          }
+          if (series.length < 2) {
+            // البطاقة تُعرض إن فُتحت الأداة، لكنها لا ترفع hasData: قياس واحد لا يبرّر
+            // فتح شاشة كاملة تقول «لا يكفي» — التنبيه في openSpecialtyTool يكفي لذلك.
+            cards.push(_scEmptyCard(f.label, _scEmptyNote(series.length, series.length ? series[0].value : '')));
+            return;
+          }
+          // قيمة غير رقمية سقطت سهواً — تُعامَل كنصّ في الجدول أدناه
+        }
+
+        if (f.type === 'text' && series.length >= 2) {
+          var bp = series.map(function(s) { return /^(\d+)\s*\/\s*(\d+)$/.exec(s.value); });
+          if (bp.every(Boolean)) {
+            state.hasData = true;
+            cards.push(_scLineChart({
+              title: f.label, unit: '', labels: _scDateLabels(series.map(function(s) { return s.date; })),
+              series: [
+                { n: 'الرقم الأول', color: 'var(--primary)', v: bp.map(function(m) { return +m[1]; }) },
+                { n: 'الرقم الثاني', color: 'var(--chart-accent-2)', v: bp.map(function(m) { return +m[2]; }) }
+              ]
+            }));
+            return;
+          }
+        }
+
+        // الباقي (نص عام، نص طويل، نعم/لا، قائمة، أو رقم/نص لم يصلح لمنحنى) → عمود في جدول المقارنة المشترك
+        // بزيارتين فأكثر فقط — جدول بصفّ واحد لا يقارن شيئاً ويكرّر ما تعرضه بطاقة الزيارة نفسها أصلاً
+        if (series.length >= 2) {
+          state.hasData = true;
+          if (!tableRows) tableRows = {};
+          tableCols.push(f.label);
+          series.forEach(function(s) {
+            if (!tableRows[s.date]) tableRows[s.date] = {};
+            tableRows[s.date][f.label] = (f.type === 'checkbox') ? (s.value ? 'نعم' : '') : s.value;
+          });
+        }
+      });
+
+      var tableHtml = '';
+      if (tableRows) {
+        var dates = Object.keys(tableRows).sort().reverse();   // الأحدث أولاً في الجدول (يقرأه الطبيب من الأعلى)
+        var rows = dates.map(function(d) {
+          return { date: formatDateAr(d), vals: tableCols.map(function(c) { return tableRows[d][c] || ''; }) };
+        });
+        tableHtml = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:12px;">' +
+          '<div style="font-size:.85rem;font-weight:700;color:var(--text-primary);margin-bottom:10px;">مقارنة عبر الزيارات</div>' + _scTable(tableCols, rows) + '</div>';
+      }
+
+      // بلا قياس حقيقي واحد لا تُفتح الأداة أصلاً (وزرّها يبقى مخفياً) — البطاقات
+      // الفارغة وحدها ليست سبباً كافياً لفتح شاشة تخلو من أي معلومة.
+      if (!state.hasData) return '';
+
+      // شبكة ٢×٢ للرسوم؛ بطاقة الحمل والجدول بعرض كامل (الجدول عريض بطبيعته)
+      var grid = cards.length
+        ? '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-bottom:12px;">' + cards.join('') + '</div>'
+        : '';
+      return lmpBlock + grid + tableHtml;
+    }
+
+    // ★ فتح/إغلاق مودال الأداة السريرية — بنفس آلية مودال مخطّط الأسنان (openDentalChart/closeDentalChart):
+    // مودال ملء الشاشة (dc-page) فوق اضبارة المريض، بلا حاجة لإخفاء mainRail لأنه يغطّي الشاشة بالكامل.
+    window.openSpecialtyTool = function(pid) {
+      var p = allPatients[pid]; if (!p) return;
+      var body = _scBuildBody(pid);
+      if (!body) { showToast('لا توجد بيانات كافية بعد لعرض الأداة السريرية — تحتاج زيارتين فأكثر بقيم', 'info'); return; }
+      var meta = _scSpecialtyMeta();
+      document.getElementById('scIcon').innerHTML = _scIcon(meta.icon);
+      document.getElementById('scTitle').textContent = meta.title;
+      document.getElementById('scPatientName').textContent = (p.name || '') + ' — مقارنة القياسات عبر الزيارات';
+      document.getElementById('scBody').innerHTML = body;
+      document.getElementById('specialtyToolModal').classList.remove('hidden');
+    };
+    window.closeSpecialtyTool = function() { document.getElementById('specialtyToolModal').classList.add('hidden'); };
+
+    /* ===== مُخصِّص الاضبارة (نافذة الإعدادات) ===== */
+    var _cfDraft = { patient: [], visit: [] };
+    function _cfClone(f) { return { id: f.id || _cfNewId(), label: f.label || '', type: f.type || 'text', options: (f.options || []).slice(), role: f.role || '' }; }
+
+    window.openChartCustomizer = function() {
+      var t = getChartTemplate();
+      _cfDraft = { patient: t.patient.map(_cfClone), visit: t.visit.map(_cfClone), dental: !!(settings && settings.chartTemplate && settings.chartTemplate.dental) };
+      // ملء قائمة القوالب الجاهزة
+      var sel = document.getElementById('cfPresetSelect');
+      if (sel) {
+        sel.innerHTML = '<option value="">— اختر تخصصاً —</option>'
+          + Object.keys(CHART_PRESETS).map(function(k) { return '<option value="' + _cfAttr(k) + '">' + escapeHtml(k) + '</option>'; }).join('');
+      }
+      renderCustomizerRows();
+      // حالة مفاتيح الميزات — العمليات لكل التخصّصات، التقويم للأسنان فقط
+      var _cfs = document.getElementById('cfFeatSurg'); if (_cfs) _cfs.checked = !!(settings && settings.surgicalArchive);
+      var _cfo = document.getElementById('cfFeatOrtho'); if (_cfo) _cfo.checked = !!(settings && settings.orthoArchive);
+      var _cfoRow = document.getElementById('cfFeatOrthoRow'); if (_cfoRow) _cfoRow.style.display = _dentalEnabled() ? 'flex' : 'none';
+      document.getElementById('chartCustomizerModal').classList.remove('hidden');
+      var _rail = document.getElementById('mainRail'); if (_rail) _rail.style.display = 'none';   // إخفاء السايدبار (ملء الشاشة)
+    };
+    window.cfToggleSurgical = function(on) {
+      settings.surgicalArchive = !!on;
+      saveSettingsToLocal(settings);
+      if (currentPatientIdForVisit && typeof _surgeryUpdateBadge === 'function') _surgeryUpdateBadge(currentPatientIdForVisit);
+    };
+    window.cfToggleOrtho = function(on) {
+      settings.orthoArchive = !!on;
+      saveSettingsToLocal(settings);
+      if (currentPatientIdForVisit && typeof _orthoUpdateBadge === 'function') _orthoUpdateBadge(currentPatientIdForVisit);
+    };
+    window.closeChartCustomizer = function() {
+      document.getElementById('chartCustomizerModal').classList.add('hidden');
+      var _rail = document.getElementById('mainRail'); if (_rail) _rail.style.display = '';   // إعادة إظهار السايدبار
+    };
+
+    function _cfRowHtml(scope, f, idx) {
+      var typeOpts = CF_TYPES.map(function(t) { return '<option value="' + t.v + '"' + (t.v === f.type ? ' selected' : '') + '>' + t.label + '</option>'; }).join('');
+      var showOpts = (f.type === 'select');
+      var btn = 'width:32px;height:32px;border-radius:9px;border:1.5px solid var(--border);background:var(--bg);color:var(--text-muted);cursor:pointer;flex-shrink:0;font-size:.82rem;';
+      var subLbl = 'font-size:.68rem;color:var(--text-muted);font-weight:600;margin-bottom:4px;';
+      var roles = _cfRolesFor(f.type || 'text', scope);   // الأدوار الصالحة لهذا النوع والموضع
+      // بطاقة حقل — بنفس هوية بطاقات الاضبارة: عنوان بارز أعلى، النوع والخيارات أسفله
+      return '<div style="background:var(--surface);border:1.5px solid var(--border);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow-sm);">'
+        + '<div style="display:flex;gap:8px;align-items:center;">'
+          + '<span style="width:32px;height:32px;border-radius:9px;background:var(--primary-light);color:var(--primary);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:.8rem;"><i class="fas fa-grip-vertical"></i></span>'
+          + '<input class="form-input" style="flex:1;min-width:0;font-weight:700;" value="' + _cfAttr(f.label) + '" placeholder="اسم الحقل (مثال: ضغط الدم)" oninput="cfEdit(\'' + scope + '\',' + idx + ',\'label\',this.value)">'
+          + '<button title="حذف الحقل" style="' + btn + 'color:#dc2626;border-color:#fecaca;background:#fef2f2;" onclick="cfDelete(\'' + scope + '\',' + idx + ')"><i class="fas fa-trash"></i></button>'
+        + '</div>'
+        + '<div style="display:flex;gap:10px;flex-wrap:wrap;padding-right:40px;">'
+          + '<div style="flex:1;min-width:130px;"><div style="' + subLbl + '">نوع الحقل</div>'
+            + '<select class="form-input" onchange="cfEdit(\'' + scope + '\',' + idx + ',\'type\',this.value)">' + typeOpts + '</select></div>'
+          + '<div style="flex:2;min-width:150px;' + (showOpts ? '' : 'display:none;') + '"><div style="' + subLbl + '">الخيارات (افصل بفاصلة)</div>'
+            + '<input class="form-input" value="' + _cfAttr((f.options || []).join('، ')) + '" placeholder="مثال: خيار 1، خيار 2، خيار 3" oninput="cfEdit(\'' + scope + '\',' + idx + ',\'options\',this.value)"></div>'
+        + '</div>'
+        + (roles.length
+            ? '<div style="padding-right:40px;"><div style="' + subLbl + '">الدور السريري (اختياري)</div>'
+                + '<select class="form-input" onchange="cfSetRole(\'' + scope + '\',' + idx + ',this.value)">'
+                  + '<option value="">— بلا دور —</option>'
+                  + roles.map(function(r) {
+                      return '<option value="' + r.v + '"' + (f.role === r.v ? ' selected' : '') + '>' + escapeHtml(r.label) + '</option>';
+                    }).join('')
+                + '</select>'
+                + '<div style="font-size:.68rem;color:var(--text-muted);margin-top:5px;line-height:1.6;">يُعرّف النظام بمعنى الحقل — فتُبنى عليه الأداة السريرية بدل تخمينها من النوع.</div>'
+              + '</div>'
+            : '')
+      + '</div>';
+    }
+    function _cfEmptyRows() {
+      return '<div style="grid-column:1/-1;text-align:center;padding:22px 14px;color:var(--text-muted);font-size:.82rem;border:1.5px dashed var(--border);border-radius:14px;"><i class="fas fa-inbox" style="font-size:1.4rem;display:block;margin-bottom:8px;opacity:.4;"></i>لا توجد حقول بعد — اضغط «إضافة حقل» أو طبّق قالباً جاهزاً.</div>';
+    }
+    function renderCustomizerRows() {
+      var pc = document.getElementById('cfPatientRows'), vc = document.getElementById('cfVisitRows');
+      if (pc) pc.innerHTML = _cfDraft.patient.length ? _cfDraft.patient.map(function(f, i) { return _cfRowHtml('patient', f, i); }).join('') : _cfEmptyRows();
+      if (vc) vc.innerHTML = _cfDraft.visit.length ? _cfDraft.visit.map(function(f, i) { return _cfRowHtml('visit', f, i); }).join('') : _cfEmptyRows();
+    }
+    window.cfEdit = function(scope, idx, key, val) {
+      var f = _cfDraft[scope] && _cfDraft[scope][idx]; if (!f) return;
+      if (key === 'options') { f.options = val.split(/[،,]/).map(function(s) { return s.trim(); }).filter(Boolean); }
+      else if (key === 'type') {
+        f.type = val;
+        if (!_cfRoleAllowed(f.role, val, scope)) f.role = '';   // دور لم يعد يناسب النوع الجديد
+        renderCustomizerRows();   // إعادة الرسم لإظهار/إخفاء حقلي الخيارات والدور
+      }
+      else f[key] = val;
+    };
+    window.cfAdd = function(scope) {
+      _cfDraft[scope].push({ id: _cfNewId(), label: '', type: 'text', options: [], role: '' });
+      renderCustomizerRows();
+    };
+    // دور واحد لا يتكرّر: إسناده لحقل ينزعه عن أي حقل آخر يحمله (في الموضعين معاً،
+    // لأن أداةً واحدة قد تقرأ دوراً من المريض وآخر من الزيارة — كالجنس مع الوزن).
+    window.cfSetRole = function(scope, idx, role) {
+      var arr = _cfDraft[scope]; if (!arr || !arr[idx]) return;
+      if (role) {
+        ['patient', 'visit'].forEach(function(s) {
+          (_cfDraft[s] || []).forEach(function(f, i) {
+            if (f.role === role && !(s === scope && i === idx)) f.role = '';
+          });
+        });
+      }
+      arr[idx].role = role || '';
+      renderCustomizerRows();
+    };
+    window.cfDelete = function(scope, idx) {
+      _cfDraft[scope].splice(idx, 1);
+      renderCustomizerRows();
+    };
+    window.cfMove = function(scope, idx, dir) {
+      var arr = _cfDraft[scope], j = idx + dir;
+      if (j < 0 || j >= arr.length) return;
+      var tmp = arr[idx]; arr[idx] = arr[j]; arr[j] = tmp;
+      renderCustomizerRows();
+    };
+    window.cfApplyPreset = function(name) {
+      var preset = CHART_PRESETS[name];
+      if (!preset) { showToast('اختر تخصصاً أولاً', 'info'); return; }
+      function apply() {
+        _cfDraft = { patient: (preset.patient || []).map(_cfClone), visit: (preset.visit || []).map(_cfClone), dental: (name === 'أسنان') };
+        renderCustomizerRows();
+        showToast('تم تطبيق قالب «' + name + '»' + (name === 'أسنان' ? ' — سيظهر مخطط الأسنان في الاضبارة' : ''), 'success');
+      }
+      if (_cfDraft.patient.length || _cfDraft.visit.length) {
+        // رسالة تأكيد داخل النظام (بدل نافذة المتصفح)
+        appConfirm('سيتم استبدال الحقول الحالية بحقول قالب «' + name + '». متابعة؟', 'استبدال').then(function(ok) { if (ok) apply(); });
+      } else {
+        apply();
+      }
+    };
+    window.saveChartTemplate = function() {
+      // الدور يُحفظ متى كان صالحاً لنوع الحقل وموضعه — لا يُقصَر على حقول التاريخ
+      function clean(scope) {
+        return function(arr) {
+          return arr.filter(function(f) { return (f.label || '').trim(); }).map(function(f) {
+            return {
+              id: f.id || _cfNewId(), label: f.label.trim(), type: f.type || 'text',
+              options: f.type === 'select' ? (f.options || []) : [],
+              role: _cfRoleAllowed(f.role, f.type || 'text', scope) ? f.role : ''
+            };
+          });
+        };
+      }
+      if (typeof settings === 'undefined' || !settings) settings = {};
+      settings.chartTemplate = { patient: clean('patient')(_cfDraft.patient), visit: clean('visit')(_cfDraft.visit), dental: !!_cfDraft.dental };
+      saveSettingsToLocal(settings);
+      closeChartCustomizer();
+      showToast('تم حفظ تخصيص الاضبارة ✓', 'success');
+    };
+
+    /* ===== 🦷 نظام مخطط الأسنان (منقول من نسخة dental) — يُفتح عبر openDentalChart(pid) ===== */
+    // ===== 🦷 مخطط الأسنان v2 — نموذج الأحداث (Events) + حالة مشتقة (Derived Status) =====
+    // القاعدة: السن = مجموعة أحداث + حالة حالية تُحسب تلقائياً. المخطط عرض فقط.
+    // ألوان الحالات (للأسطح وكامل السن واللوحة التوضيحية)
+    var DC_STATUS = {
+      healthy:   { label: 'سليم',      bg: '#ffffff', bd: '#cbd5e1' },
+      caries:    { label: 'تسوّس',      bg: '#fca5a5', bd: '#ef4444' },
+      sec_caries:{ label: 'تسوّس ثانوي',bg: '#f8b4b4', bd: '#b91c1c' },
+      filled:    { label: 'حشوة',      bg: '#fde68a', bd: '#f59e0b' },
+      root:      { label: 'علاج عصب',  bg: '#d9f99d', bd: '#65a30d' },
+      crowned:   { label: 'تاج',       bg: '#bfdbfe', bd: '#3b82f6' },
+      bridge:    { label: 'جسر',       bg: '#ddd6fe', bd: '#7c3aed' },
+      implant:   { label: 'زرعة',      bg: '#a7f3d0', bd: '#059669' },
+      extracted: { label: 'مقلوع',     bg: '#e2e8f0', bd: '#94a3b8' },
+      missing:   { label: 'مفقود',     bg: '#f1f5f9', bd: '#cbd5e1' },
+      impacted:  { label: 'منطمر',     bg: '#ede9fe', bd: '#8b5cf6' }
+    };
+    // أنواع الأحداث: موجودات (findings) ومعالجات (treatments).
+    // layer = الطبقة التي يؤثر عليها الحدث:
+    //   existence (وجود السن) | coverage (تغطية: تاج/جسر) | endo (عصب) | impacted (انطمار)
+    //   | surface (سطح محدد: تسوّس/حشوة) | alert (تنبيه: ألم/كسر/لثة/حركة) | reset (سليم) | none (تنظيف)
+    var DC_EVENTS = {
+      // ── موجودات ──
+      caries:     { label: 'تسوّس',        color: '#ef4444', kind: 'finding',   layer: 'surface',   surf: 'caries' },
+      sec_caries: { label: 'تسوّس ثانوي',  color: '#b91c1c', kind: 'finding',   layer: 'surface',   surf: 'sec_caries' },
+      pain:       { label: 'ألم',          color: '#f97316', kind: 'finding',   layer: 'alert' },
+      fracture:   { label: 'كسر',          color: '#e11d48', kind: 'finding',   layer: 'alert' },
+      gum:        { label: 'التهاب لثة',   color: '#f43f5e', kind: 'finding',   layer: 'alert' },
+      mobility:   { label: 'حركة/قلقلة',   color: '#d946ef', kind: 'finding',   layer: 'alert' },
+      impacted:   { label: 'منطمر',        color: '#8b5cf6', kind: 'finding',   layer: 'impacted' },
+      missing:    { label: 'مفقود',        color: '#94a3b8', kind: 'finding',   layer: 'existence', exist: 'missing' },
+      // ── معالجات ──
+      filled:     { label: 'حشوة',         color: '#f59e0b', kind: 'treatment', layer: 'surface',   surf: 'filled' },
+      root:       { label: 'علاج عصب',     color: '#65a30d', kind: 'treatment', layer: 'endo' },
+      crowned:    { label: 'تاج',          color: '#3b82f6', kind: 'treatment', layer: 'coverage',  cover: 'crowned' },
+      bridge:     { label: 'جسر',          color: '#7c3aed', kind: 'treatment', layer: 'coverage',  cover: 'bridge' },
+      implant:    { label: 'زرعة',         color: '#059669', kind: 'treatment', layer: 'existence', exist: 'implant' },
+      extracted:  { label: 'قلع',          color: '#64748b', kind: 'treatment', layer: 'existence', exist: 'extracted' },
+      cleaning:   { label: 'تنظيف',        color: '#0ea5e9', kind: 'treatment', layer: 'none' },
+      healthy:    { label: 'سليم',         color: '#10b981', kind: 'treatment', layer: 'reset' }
+    };
+    // ألوان حالات الأسطح
+    var DC_SURF_COLORS = { caries: '#ef4444', sec_caries: '#b91c1c', filled: '#f59e0b' };
+    var DC_FINDINGS = ['caries', 'sec_caries', 'pain', 'fracture', 'gum', 'mobility', 'impacted', 'missing'];
+    var DC_TREATMENTS = ['filled', 'root', 'crowned', 'bridge', 'implant', 'extracted', 'cleaning', 'healthy'];
+    var DC_UPPER = [28,27,26,25,24,23,22,21,11,12,13,14,15,16,17,18];
+    var DC_LOWER = [38,37,36,35,34,33,32,31,41,42,43,44,45,46,47,48];
+    // أرباع عرض القوس (Odontogram): يمين المريض = يسار الشاشة (العرف السريري)
+    var DC_ARCH_QUADS = [
+      { teeth: [11,12,13,14,15,16,17,18], sx: -1, jaw: 'up'  },
+      { teeth: [21,22,23,24,25,26,27,28], sx:  1, jaw: 'up'  },
+      { teeth: [41,42,43,44,45,46,47,48], sx: -1, jaw: 'low' },
+      { teeth: [31,32,33,34,35,36,37,38], sx:  1, jaw: 'low' }
+    ];
+    function dcToothName(fdi) {
+      var q = Math.floor(fdi / 10), pos = fdi % 10;
+      var posNames = { 1: 'قاطع مركزي', 2: 'قاطع جانبي', 3: 'ناب', 4: 'ضاحك أول', 5: 'ضاحك ثاني', 6: 'طاحن أول', 7: 'طاحن ثاني', 8: 'طاحن ثالث' };
+      return posNames[pos] + ' ' + (q <= 2 ? 'علوي' : 'سفلي') + ' ' + ((q === 1 || q === 4) ? 'أيمن' : 'أيسر');
+    }
+    function dcRootCount(fdi) {
+      var q = Math.floor(fdi / 10), pos = fdi % 10;
+      if (pos <= 3) return 1;
+      if (pos <= 5) return 2;
+      if (q <= 2) return 3;
+      return pos === 6 ? 2 : 3;
+    }
+    function dcToothEvents(p, fdi) {
+      return (p && p.dentalEvents || []).filter(function(e){ return String(e.tooth) === String(fdi); })
+        .slice().sort(function(a, b) {
+          var d = (a.date || '').localeCompare(b.date || '');
+          return d !== 0 ? d : ((a.ts || 0) - (b.ts || 0));
+        });
+    }
+    // تعريف الحدث (مع توافق للأحداث القديمة التي تحمل e.to)
+    function dcDefOf(e) {
+      if (DC_EVENTS[e.type]) return DC_EVENTS[e.type];
+      var map = { healthy:'healthy', caries:'caries', filled:'filled', root:'root', crowned:'crowned', bridge:'bridge', implant:'implant', extracted:'extracted' };
+      if (e && e.to && map[e.to]) return DC_EVENTS[map[e.to]];
+      return null;
+    }
+    // اشتقاق الحالة الحالية تلقائياً من سلسلة الأحداث — نموذج طبقي + لكل سطح على حِدة
+    function dcDerive(p, fdi) {
+      var evs = dcToothEvents(p, fdi);
+      var centerKey = dcSurfaceMap(fdi).center;
+      var st = { existence: 'present', coverage: null, endo: false, impacted: false, surfaces: {}, alerts: {} };
+      evs.forEach(function(e) {
+        var def = dcDefOf(e); if (!def) return;
+        switch (def.layer) {
+          case 'reset': // «سليم»: يُصفّر كل الطبقات
+            st.existence = 'present'; st.coverage = null; st.endo = false; st.impacted = false; st.surfaces = {}; st.alerts = {};
+            break;
+          case 'existence': // تغيّر هوية السن (قلع/مفقود/زرعة) يُصفّر الطبقات الأدنى
+            st.existence = def.exist;
+            st.coverage = null; st.endo = false; st.impacted = false; st.surfaces = {};
+            break;
+          case 'coverage':
+            if (st.existence !== 'implant') st.existence = 'present';
+            st.coverage = def.cover;
+            break;
+          case 'endo':
+            if (st.existence !== 'implant') st.existence = 'present';
+            st.endo = true;
+            break;
+          case 'impacted':
+            st.impacted = true;
+            break;
+          case 'surface': // تسوّس/حشوة — لكل سطح على حِدة، آخر حدث يفوز على هذا السطح فقط
+            if (st.existence !== 'implant') st.existence = 'present';
+            var sfs = (e.surfaces && e.surfaces.length) ? e.surfaces : [centerKey];
+            sfs.forEach(function(s) { st.surfaces[s] = def.surf; });
+            break;
+          case 'alert': // ألم/كسر/لثة/حركة — تنبيه بدون تغيير لون
+            st.alerts[e.type] = { type: e.type, label: def.label, color: def.color };
+            break;
+          default: break; // none (تنظيف)
+        }
+        // أي معالجة لاحقة تُلغي التنبيهات المتراكمة على السن
+        if (def.kind === 'treatment' && def.layer !== 'reset') st.alerts = {};
+      });
+      // توافق قديم: لا أحداث لكن توجد حالة مخزّنة في p.teeth
+      if (!evs.length) {
+        var t = (p && p.teeth || {})[fdi];
+        if (t && t.status && t.status !== 'healthy') {
+          if (t.status === 'extracted' || t.status === 'implant' || t.status === 'missing') st.existence = t.status;
+          else if (t.status === 'crowned' || t.status === 'bridge') st.coverage = t.status;
+          else if (t.status === 'root') st.endo = true;
+          else if (t.status === 'caries' || t.status === 'filled') {
+            var old = (t.surfaces && t.surfaces.length) ? t.surfaces : [centerKey];
+            old.forEach(function(s) { st.surfaces[s] = t.status; });
+          }
+        }
+      }
+      var alerts = Object.keys(st.alerts).map(function(k) { return st.alerts[k]; });
+      var hasCaries = Object.keys(st.surfaces).some(function(s) { return st.surfaces[s] === 'caries' || st.surfaces[s] === 'sec_caries'; });
+      var hasFilling = Object.keys(st.surfaces).some(function(s) { return st.surfaces[s] === 'filled'; });
+      var attention = (st.existence === 'present') && (hasCaries || alerts.length > 0);
+      return {
+        existence: st.existence, coverage: st.coverage, endo: st.endo, impacted: st.impacted,
+        surfaces: st.surfaces, alerts: alerts, hasCaries: hasCaries, hasFilling: hasFilling,
+        attention: attention, eventsCount: evs.length
+      };
+    }
+    // الحالة الرئيسية للسن (لأغراض العنوان/الملخّص) — أولوية منطقية
+    function dcPrimaryStatus(d) {
+      if (d.existence === 'extracted') return 'extracted';
+      if (d.existence === 'missing') return 'missing';
+      if (d.existence === 'implant') return 'implant';
+      if (d.coverage) return d.coverage;
+      if (d.hasCaries) return 'caries';
+      if (d.hasFilling) return 'filled';
+      if (d.endo) return 'root';
+      if (d.impacted) return 'impacted';
+      return 'healthy';
+    }
+    function dcSurfaceMap(fdi) {
+      var q = Math.floor(fdi / 10);
+      var upper = q <= 2;
+      var mesialOnLeft = (q === 2 || q === 3);
+      return {
+        top:    upper ? 'B' : 'L',
+        bottom: upper ? 'L' : 'B',
+        left:   mesialOnLeft ? 'M' : 'D',
+        right:  mesialOnLeft ? 'D' : 'M',
+        center: (fdi % 10) <= 3 ? 'I' : 'O'
+      };
+    }
+    function dcCrownPath(pos) {
+      if (pos <= 2) return 'M30,8 Q42,10 43,30 Q42,50 30,52 Q18,50 17,30 Q18,10 30,8 Z';
+      if (pos === 3) return 'M30,5 Q45,13 44,30 Q45,47 30,55 Q15,47 16,30 Q15,13 30,5 Z';
+      if (pos <= 5) return 'M30,7 Q48,10 49,30 Q48,50 30,53 Q12,50 11,30 Q12,10 30,7 Z';
+      return 'M14,8 Q30,3 46,8 Q57,13 57,30 Q57,47 46,52 Q30,57 14,52 Q3,47 3,30 Q3,13 14,8 Z';
+    }
+    // بناء السن: viewBox 84×84 — التاج في المنتصف والأحرف M/D/B/L خارج السن دائماً
+    // view = الكائن المشتق { existence, coverage, endo, impacted, surfaces:{حرف:حالة} }
+    // plain = بدون أحرف الأسطح (لعرض القوس المصغّر)
+    // مخطط السطوح المثمّن (Odontogram احترافي): مناطق بأحرف داخلية B/L/M/D/O
+    function dcToothSVG(fdi, view, interactive, plain) {
+      view = view || {};
+      var surfaces  = view.surfaces || {};
+      var existence = view.existence || 'present';
+      var coverage  = view.coverage || null;
+      var impacted  = view.impacted || false;
+      var isImplant = existence === 'implant';
+      var gone = existence === 'extracted' || existence === 'missing';
+      var map = dcSurfaceMap(fdi);
+      var OCT = 'M30,5 L70,5 L95,30 L95,70 L70,95 L30,95 L5,70 L5,30 Z';
+      var zones = [
+        { key: 'top',    d: 'M30,5 L70,5 L62,32 L38,32 Z',                lx: 50, ly: 24 },
+        { key: 'bottom', d: 'M30,95 L70,95 L62,68 L38,68 Z',              lx: 50, ly: 86 },
+        { key: 'left',   d: 'M30,5 L5,30 L5,70 L30,95 L38,68 L38,32 Z',   lx: 19, ly: 55 },
+        { key: 'right',  d: 'M70,5 L95,30 L95,70 L70,95 L62,68 L62,32 Z', lx: 81, ly: 55 },
+        { key: 'center', d: 'M44,32 h12 a6,6 0 0 1 6,6 v24 a6,6 0 0 1 -6,6 h-12 a6,6 0 0 1 -6,-6 v-24 a6,6 0 0 1 6,-6 Z', lx: 50, ly: 55 }
+      ];
+      // الناب: تاج مدبّب مميّز — الذروة نحو السطح القاطع (أسفل للعلوي، أعلى للسفلي)
+      var posT = fdi % 10, upperT = Math.floor(fdi / 10) <= 2;
+      if (posT === 3) {
+        if (upperT) {
+          OCT = 'M30,4 L70,4 L95,28 L95,54 L50,97 L5,54 L5,28 Z';
+          zones = [
+            { key: 'top',    d: 'M30,4 L70,4 L62,30 L38,30 Z',              lx: 50, ly: 22 },
+            { key: 'bottom', d: 'M5,54 L38,58 L62,58 L95,54 L50,97 Z',      lx: 50, ly: 74 },
+            { key: 'left',   d: 'M30,4 L5,28 L5,54 L38,58 L38,30 Z',        lx: 18, ly: 45 },
+            { key: 'right',  d: 'M70,4 L95,28 L95,54 L62,58 L62,30 Z',      lx: 82, ly: 45 },
+            { key: 'center', d: 'M44,30 h12 a6,6 0 0 1 6,6 v16 a6,6 0 0 1 -6,6 h-12 a6,6 0 0 1 -6,-6 v-16 a6,6 0 0 1 6,-6 Z', lx: 50, ly: 48 }
+          ];
+        } else {
+          OCT = 'M50,3 L95,46 L95,72 L70,96 L30,96 L5,72 L5,46 Z';
+          zones = [
+            { key: 'top',    d: 'M5,46 L38,42 L62,42 L95,46 L50,3 Z',       lx: 50, ly: 28 },
+            { key: 'bottom', d: 'M30,96 L70,96 L62,70 L38,70 Z',            lx: 50, ly: 88 },
+            { key: 'left',   d: 'M5,46 L5,72 L30,96 L38,70 L38,42 Z',       lx: 18, ly: 58 },
+            { key: 'right',  d: 'M95,46 L95,72 L70,96 L62,70 L62,42 Z',     lx: 82, ly: 58 },
+            { key: 'center', d: 'M44,42 h12 a6,6 0 0 1 6,6 v16 a6,6 0 0 1 -6,6 h-12 a6,6 0 0 1 -6,-6 v-16 a6,6 0 0 1 6,-6 Z', lx: 50, ly: 55 }
+          ];
+        }
+      }
+      var body = '';
+      zones.forEach(function(z) {
+        var surf = map[z.key];
+        var state = gone ? null : (surfaces[surf] || null);
+        var fill = state ? (DC_SURF_COLORS[state] || '#ef4444') : '#ffffff';
+        var fop  = state ? (coverage ? '.4' : '.92') : '1';
+        var attrs = ' fill="' + fill + '" fill-opacity="' + fop + '" stroke="#d8dfe9" stroke-width="1.6" stroke-linejoin="round"';
+        if (interactive && !gone) attrs += ' class="te-surface" data-surface="' + surf + '" onclick="dcToggleSurface(\'' + surf + '\')" style="pointer-events:all;cursor:pointer;"';
+        body += '<path d="' + z.d + '"' + attrs + '/>';
+        if (!plain) {
+          var lFill = state ? '#ffffff' : (gone ? '#c9d2df' : '#9aa7ba');
+          body += '<text x="' + z.lx + '" y="' + z.ly + '" text-anchor="middle" font-size="' + (interactive ? 14 : 13) + '" font-weight="800" fill="' + lFill + '" style="pointer-events:none;font-family:var(--font-num),sans-serif;">' + surf + '</text>';
+        }
+      });
+      var outline = coverage === 'crowned' ? '#3b82f6' : (coverage === 'bridge' ? '#7c3aed' : (isImplant ? '#059669' : '#c9d2df'));
+      var ow = coverage ? 5 : (isImplant ? 4 : 3);
+      var g = '<g' + (impacted ? ' opacity=".55"' : '') + '>' + body
+        + '<path d="' + OCT + '" fill="none" stroke="' + outline + '" stroke-width="' + ow + '" stroke-linejoin="round"/>';
+      if (impacted) g += '<path d="' + OCT + '" fill="none" stroke="#8b5cf6" stroke-width="2.5" stroke-dasharray="6,5" stroke-linejoin="round"/>';
+      g += '</g>';
+      if (existence === 'extracted') g += '<path d="M25,25 L75,75 M75,25 L25,75" stroke="#94a3b8" stroke-width="9" stroke-linecap="round"/>';
+      if (existence === 'missing')   g += '<path d="M25,25 L75,75 M75,25 L25,75" stroke="#ef4444" stroke-width="9" stroke-linecap="round" stroke-opacity=".85"/>';
+      return '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">' + g + '</svg>';
+    }
+    // جذور مثلثية بقناة متقطعة (تخضرّ مع علاج العصب) — أو برغي زرعة
+    function dcRootsSVG(fdi, d, upper, w) {
+      var gone = (d.existence === 'extracted' || d.existence === 'missing');
+      if (gone) return '<svg class="dc-roots-svg" width="' + w + '" height="24" viewBox="0 0 64 24" style="visibility:hidden;"></svg>';
+      var inner = '';
+      if (d.existence === 'implant') {
+        var thr = '';
+        for (var t = 0; t < 3; t++) { var ty = upper ? (7 + t * 5.5) : (17 - t * 5.5); thr += '<line x1="27" y1="' + ty + '" x2="37" y2="' + (ty - 2) + '" stroke="#ecfdf5" stroke-width="1.4" stroke-opacity=".9"/>'; }
+        inner = upper
+          ? '<path d="M27,24 L29.5,3 Q32,0.8 34.5,3 L37,24 Z" fill="#059669"/>' + thr
+          : '<path d="M27,0 L29.5,21 Q32,23.2 34.5,21 L37,0 Z" fill="#059669"/>' + thr;
+      } else {
+        var rc = dcRootCount(fdi);
+        var rw = 13, gap = 3.5, total = rc * rw + (rc - 1) * gap, x0 = (64 - total) / 2;
+        var fill = d.endo ? '#bbf7d0' : '#eef2f8', stroke = d.endo ? '#22c55e' : '#c8d2e0', canal = d.endo ? '#16a34a' : '#b8c4d6';
+        for (var i = 0; i < rc; i++) {
+          var x = x0 + i * (rw + gap), mx = x + rw / 2;
+          if (upper) {
+            inner += '<path d="M' + x + ',23 L' + (mx - 1.6) + ',3.5 Q' + mx + ',1.2 ' + (mx + 1.6) + ',3.5 L' + (x + rw) + ',23 Z" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1.4" stroke-linejoin="round"/>'
+                   + '<line x1="' + mx + '" y1="6" x2="' + mx + '" y2="20" stroke="' + canal + '" stroke-width="1.3" stroke-dasharray="2.5,2.2"/>';
+          } else {
+            inner += '<path d="M' + x + ',1 L' + (mx - 1.6) + ',20.5 Q' + mx + ',22.8 ' + (mx + 1.6) + ',20.5 L' + (x + rw) + ',1 Z" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1.4" stroke-linejoin="round"/>'
+                   + '<line x1="' + mx + '" y1="4" x2="' + mx + '" y2="18" stroke="' + canal + '" stroke-width="1.3" stroke-dasharray="2.5,2.2"/>';
+          }
+        }
+      }
+      return '<svg class="dc-roots-svg" width="' + w + '" height="24" viewBox="0 0 64 24">' + inner + '</svg>';
+    }
+    function dcBuildTooth(fdi, p) {
+      var d = dcDerive(p, fdi);
+      var pos = fdi % 10, upper = fdi < 30;
+      var w = pos <= 2 ? 50 : (pos === 3 ? 54 : (pos <= 5 ? 58 : 68));
+      var roots = dcRootsSVG(fdi, d, upper, Math.round(w * 0.78));
+      var crown = '<div class="dc-crown" style="width:' + w + 'px;height:' + w + 'px;">' + dcToothSVG(fdi, d, false) + '</div>';
+      var num = '<div class="dc-num">' + Math.floor(fdi / 10) + '.' + pos + '</div>';
+      var parts = [DC_STATUS[dcPrimaryStatus(d)].label];
+      if (d.endo && dcPrimaryStatus(d) !== 'root') parts.push('عصب');
+      if (d.impacted && dcPrimaryStatus(d) !== 'impacted') parts.push('منطمر');
+      var alertTxt = d.alerts.map(function(a){ return a.label; }).join('، ');
+      var title = dcToothName(fdi) + ' — ' + parts.join(' + ')
+        + (alertTxt ? ' ⚠ ' + alertTxt : '')
+        + (d.eventsCount ? ' (' + d.eventsCount + ' حدث)' : '');
+      var showDot = d.alerts.length > 0;
+      return '<div class="dc-tooth" onclick="openToothEditor(' + fdi + ',event)" title="' + escapeHtml(title) + '">'
+        + (showDot ? '<span class="dc-alert" title="' + escapeHtml(alertTxt) + '"></span>' : '')
+        + (upper ? num + roots + crown : crown + roots + num)
+        + '</div>';
+    }
+    // ===== عرض القوس (Odontogram بيضوي) — نفس محرك الاشتقاق، توزيع هندسي على قطع ناقص =====
+    // ── سن ثلاثي الأبعاد لعرض القوس: تدرّجات مينا + ظل حوافّ + لمعة + شقوق إطباقية ──
+    function dcTooth3D(fdi, d) {
+      var pos = fdi % 10, uid = 'a3' + fdi;
+      var isMolar = pos >= 6, isPre = (pos === 4 || pos === 5);
+      var vbH = isMolar ? 66 : (isPre ? 74 : 80);
+      var crown, fissure = '';
+      if (isMolar) {
+        crown = 'M20,7 C27,3 37,3 44,7 C54,11 58,20 58,33 C58,47 54,56 44,61 C37,65 27,65 20,61 C10,56 6,47 6,33 C6,20 10,11 20,7 Z';
+        fissure = '<path d="M21,25 C28,31 36,31 43,25 M21,42 C28,36 36,36 43,42 M32,28 L32,39" stroke="#8f94a6" stroke-opacity=".42" stroke-width="2" fill="none" stroke-linecap="round"/>';
+      } else if (isPre) {
+        crown = 'M21,8 C27,5 37,5 43,8 C52,12 56,21 56,36 C56,51 52,59 43,64 C37,67 27,67 21,64 C12,59 8,51 8,36 C8,21 12,12 21,8 Z';
+        fissure = '<path d="M18,37 C26,32 38,32 46,37" stroke="#8f94a6" stroke-opacity=".35" stroke-width="2" fill="none" stroke-linecap="round"/>';
+      } else if (pos === 3) {
+        crown = 'M32,2 C43,9 52,22 52,42 C52,62 44,74 32,76 C20,74 12,62 12,42 C12,22 21,9 32,2 Z';
+        fissure = '<path d="M32,20 C31,33 33,47 32,57" stroke="#8f94a6" stroke-opacity=".22" stroke-width="2" fill="none" stroke-linecap="round"/>';
+      } else {
+        crown = 'M32,7 C46,7 54,17 54,36 C54,59 46,73 32,73 C18,73 10,59 10,36 C10,17 18,7 32,7 Z';
+        fissure = '<path d="M25,20 C24,34 24,48 25,60 M39,20 C40,34 40,48 39,60" stroke="#8f94a6" stroke-opacity=".14" stroke-width="2" fill="none" stroke-linecap="round"/>';
+      }
+      var svgOpen = '<svg viewBox="0 0 64 ' + vbH + '" xmlns="http://www.w3.org/2000/svg">';
+      // مفقود: مكان فارغ بحدود منقّطة
+      if (d.existence === 'missing') {
+        return svgOpen + '<path d="' + crown + '" fill="rgba(148,163,184,.07)" stroke="#cbd5e1" stroke-width="1.8" stroke-dasharray="5,4"/></svg>';
+      }
+      // مقلوع: سن باهت مطفي مع ✕
+      if (d.existence === 'extracted') {
+        return svgOpen + '<path d="' + crown + '" fill="#eef1f5" stroke="#c7cfda" stroke-width="1.5"/>'
+          + '<path d="M22,' + (vbH * .3).toFixed(0) + ' L42,' + (vbH * .7).toFixed(0) + ' M42,' + (vbH * .3).toFixed(0) + ' L22,' + (vbH * .7).toFixed(0) + '" stroke="#94a3b8" stroke-width="4.6" stroke-linecap="round"/></svg>';
+      }
+      // زرعة: برغي تيتانيوم بتدرّج معدني (رأسه أزرق إن وُجد تاج فوقه)
+      if (d.existence === 'implant') {
+        var bodyLen = vbH - 26;
+        var threads = '';
+        for (var k = 0; k < 4; k++) {
+          var ty = 22 + (k + 0.5) * (bodyLen - 4) / 4;
+          threads += '<line x1="25.5" y1="' + ty.toFixed(1) + '" x2="38.5" y2="' + (ty - 3).toFixed(1) + '" stroke="#ecfdf5" stroke-opacity=".75" stroke-width="1.5"/>';
+        }
+        return svgOpen + '<defs><linearGradient id="gI' + uid + '" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#34d399"/><stop offset="50%" stop-color="#059669"/><stop offset="100%" stop-color="#047857"/></linearGradient></defs>'
+          + '<path d="M23,7 h18 l-2.5,9 h-13 z" fill="' + (d.coverage ? '#3b82f6' : 'url(#gI' + uid + ')') + '"/>'
+          + '<path d="M26.5,16 h11 l-2.8,' + bodyLen + ' h-5.4 z" fill="url(#gI' + uid + ')"/>'
+          + threads
+          + '<ellipse cx="28" cy="10.5" rx="4.5" ry="2" fill="#fff" opacity=".5"/></svg>';
+      }
+      // ── سن موجود: طبقات ثلاثية الأبعاد ──
+      var defs = '<defs>'
+        + '<radialGradient id="gE' + uid + '" cx="36%" cy="26%" r="95%"><stop offset="0%" stop-color="#ffffff"/><stop offset="38%" stop-color="#fbfaf7"/><stop offset="72%" stop-color="#eceae3"/><stop offset="100%" stop-color="#d7d6d0"/></radialGradient>'
+        + '<radialGradient id="gS' + uid + '" cx="50%" cy="52%" r="62%"><stop offset="55%" stop-color="rgba(51,65,85,0)"/><stop offset="85%" stop-color="rgba(100,116,139,.13)"/><stop offset="100%" stop-color="rgba(51,65,85,.32)"/></radialGradient>'
+        + '<clipPath id="c' + uid + '"><path d="' + crown + '"/></clipPath>'
+        + '<filter id="f' + uid + '" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="2.3"/></filter>'
+        + '</defs>';
+      var tint = d.coverage === 'crowned' ? '#3b82f6' : (d.coverage === 'bridge' ? '#7c3aed' : (d.impacted ? '#8b5cf6' : null));
+      // بقع الأسطح (تسوّس/حشوة) — إهليلجات ناعمة مموّهة داخل حدود التاج
+      var map = dcSurfaceMap(fdi);
+      var my = vbH * 0.49;
+      var zones = {
+        top:    { x: 32, y: vbH * .2,  rx: 15,   ry: vbH * .09 + 2 },
+        bottom: { x: 32, y: vbH * .78, rx: 15,   ry: vbH * .09 + 2 },
+        left:   { x: 14, y: my,        rx: 8.5,  ry: vbH * .17 },
+        right:  { x: 50, y: my,        rx: 8.5,  ry: vbH * .17 },
+        center: { x: 32, y: my,        rx: 11.5, ry: vbH * .11 }
+      };
+      var patches = '';
+      Object.keys(zones).forEach(function(zk) {
+        var stKey = d.surfaces[map[zk]];
+        if (!stKey) return;
+        var z = zones[zk];
+        var col = stKey === 'filled' ? '#f59e0b' : (stKey === 'sec_caries' ? '#b91c1c' : '#ef4444');
+        patches += '<ellipse cx="' + z.x + '" cy="' + z.y.toFixed(1) + '" rx="' + z.rx + '" ry="' + z.ry.toFixed(1) + '" fill="' + col + '" fill-opacity=".82" filter="url(#f' + uid + ')"/>';
+      });
+      var glossY = (vbH * .2).toFixed(1);
+      var h = svgOpen + defs + '<g' + (d.impacted ? ' opacity=".62"' : '') + '>'
+        + '<path d="' + crown + '" fill="url(#gE' + uid + ')"/>'
+        + '<path d="' + crown + '" fill="url(#gS' + uid + ')"/>';
+      if (tint) h += '<path d="' + crown + '" fill="' + tint + '" fill-opacity="' + (d.coverage ? '.42' : '.3') + '"/>';
+      if (!d.coverage) h += fissure;
+      if (patches) h += '<g clip-path="url(#c' + uid + ')">' + patches + '</g>';
+      h += '<ellipse cx="23" cy="' + glossY + '" rx="12" ry="5.5" fill="#ffffff" opacity=".7" filter="url(#f' + uid + ')" transform="rotate(-18 23 ' + glossY + ')"/>';
+      if (d.coverage) h += '<path d="' + crown + '" fill="none" stroke="' + tint + '" stroke-opacity=".55" stroke-width="2" transform="translate(32,' + (vbH / 2) + ') scale(.85) translate(-32,-' + (vbH / 2) + ')"/>';
+      h += '<path d="' + crown + '" fill="none" stroke="rgba(100,116,139,.30)" stroke-width="1.3"/>';
+      if (d.impacted) h += '<path d="' + crown + '" fill="none" stroke="#8b5cf6" stroke-width="1.6" stroke-dasharray="5,4"/>';
+      h += '</g>';
+      if (d.endo) h += '<circle cx="32" cy="8" r="4.4" fill="#65a30d" stroke="#fff" stroke-width="1.6"/>';
+      return h + '</svg>';
+    }
+    function dcArchHTML(p) {
+      // هندسة بكسلية على لوح افتراضي 380×540 — تراصّ متكيّف: عرض كل سن يُحسب من المسافة لجاريه
+      var W = 380, H = 540, cx = W / 2;
+      var rx = 0.362 * W, ry = 0.412 * H;
+      var weights = [1, 0.94, 1, 1.05, 1.05, 1.26, 1.26, 1.14]; // قاطع مركزي → طاحن ثالث
+      var tot = 0; weights.forEach(function(w) { tot += w; });
+      var span = 87, start = 1.2, cum = 0, degs = [];
+      for (var i = 0; i < 8; i++) { degs.push(start + (cum + weights[i] / 2) / tot * span); cum += weights[i]; }
+      var base = degs.map(function(dg) {
+        var a = dg * Math.PI / 180;
+        return { deg: dg, bx: rx * Math.sin(a), by: ry * Math.cos(a), sinA: Math.sin(a), cosA: Math.cos(a) };
+      });
+      var dist = function(p1, p2) { return Math.sqrt(Math.pow(p1.bx - p2.bx, 2) + Math.pow(p1.by - p2.by, 2)); };
+      var widths = base.map(function(b, i) {
+        var dl = (i === 0) ? 2 * base[0].bx : dist(base[i], base[i - 1]);
+        var dr = (i === 7) ? dl : dist(base[i], base[i + 1]);
+        var vis = (i === 7) ? dr * 1.02 : (dl + dr) / 2 * 1.08;   // تلامس طفيف واقعي
+        var pos = i + 1;
+        var frac = pos >= 6 ? (52 / 64) : (pos >= 4 ? (48 / 64) : (pos === 3 ? (40 / 64) : (44 / 64))); // نسبة التاج من عرض الرسم
+        return vis / frac / W * 100;
+      });
+      var h = '<div class="dc-arch-mid-h"></div><div class="dc-arch-mid-v"></div>'
+        + '<div class="dc-arch-side" style="left:25%;top:50%;">يمين</div>'
+        + '<div class="dc-arch-side" style="left:75%;top:50%;">يسار</div>';
+      DC_ARCH_QUADS.forEach(function(q) {
+        q.teeth.forEach(function(fdi, i) {
+          var b = base[i];
+          var x = (cx + q.sx * b.bx) / W * 100;
+          var y = (q.jaw === 'up') ? (H / 2 - b.by) / H * 100 : (H / 2 + b.by) / H * 100;
+          var xN = 50 + q.sx * 47.4 * b.sinA;
+          var yN = (q.jaw === 'up') ? 50 - 48.8 * b.cosA : 50 + 48.8 * b.cosA;
+          var rot = (q.jaw === 'up') ? q.sx * b.deg : -q.sx * b.deg;
+          var pos = fdi % 10;
+          var asp = pos >= 6 ? '64/66' : (pos >= 4 ? '64/74' : '64/80');
+          var d = dcDerive(p, fdi);
+          var prim = dcPrimaryStatus(d);
+          var alertTxt = d.alerts.map(function(al){ return al.label; }).join('، ');
+          var title = dcToothName(fdi) + ' — ' + DC_STATUS[prim].label + (alertTxt ? ' ⚠ ' + alertTxt : '');
+          h += '<div class="dc-arch-tooth" style="width:' + widths[i].toFixed(2) + '%;aspect-ratio:' + asp + ';left:' + x.toFixed(2) + '%;top:' + y.toFixed(2) + '%;transform:translate(-50%,-50%) rotate(' + rot.toFixed(1) + 'deg);z-index:' + (8 - i) + ';" onclick="openToothEditor(' + fdi + ',event)" title="' + escapeHtml(title) + '">'
+            + (d.alerts.length ? '<span class="dc-alert"></span>' : '')
+            + dcTooth3D(fdi, d) + '</div>';
+          var numStyle = (prim !== 'healthy') ? 'color:' + DC_STATUS[prim].bd + ';font-weight:700;' : '';
+          h += '<div class="dc-arch-num" style="left:' + xN.toFixed(2) + '%;top:' + yN.toFixed(2) + '%;' + numStyle + '">' + fdi + '</div>';
+        });
+      });
+      return h;
+    }
+    function dcRenderArch() {
+      var p = allPatients[dcCurrentPid]; if (!p) return;
+      var host = document.getElementById('dcArch'); if (!host) return;
+      host.innerHTML = dcArchHTML(p);
+    }
+    var dcCurrentPid = null, teCurrentTooth = null, teEventTypes = [], teSurfaces = [];
+    function dcRenderChart() {
+      var p = allPatients[dcCurrentPid]; if (!p) return;
+      document.getElementById('dcUpperRow').innerHTML = DC_UPPER.map(function(f){ return dcBuildTooth(f, p); }).join('');
+      document.getElementById('dcLowerRow').innerHTML = DC_LOWER.map(function(f){ return dcBuildTooth(f, p); }).join('');
+      dcRenderArch();
+      dcRenderSummary();
+    }
+    // ── وضع العرض: الموبايل قوس دائماً، الشاشات الكبيرة زر تبديل (يُحفظ الاختيار) ──
+    var dcViewMode = null;
+    function dcIsMobile() { return window.innerWidth <= 700; }
+    function dcGetView() {
+      if (dcIsMobile()) return 'arch';
+      if (dcViewMode) return dcViewMode;
+      try { return localStorage.getItem('dcChartView') || 'rows'; } catch (e) { return 'rows'; }
+    }
+    window.dcSetView = function(m) {
+      dcViewMode = m;
+      try { localStorage.setItem('dcChartView', m); } catch (e) {}
+      dcApplyView();
+    };
+    function dcApplyView() {
+      var mode = dcGetView();
+      var rows = document.getElementById('dcRowsView'), arch = document.getElementById('dcArchView');
+      if (rows) rows.classList.toggle('hidden', mode !== 'rows');
+      if (arch) arch.classList.toggle('hidden', mode !== 'arch');
+      var wrap = document.getElementById('dcViewToggleWrap');
+      if (wrap) wrap.style.display = dcIsMobile() ? 'none' : 'flex';
+      var bR = document.getElementById('dcViewBtnRows'), bA = document.getElementById('dcViewBtnArch');
+      if (bR) bR.classList.toggle('active', mode === 'rows');
+      if (bA) bA.classList.toggle('active', mode === 'arch');
+      dcRenderChart();
+    }
+    var _dcResizeT = null;
+    window.addEventListener('resize', function() {
+      var m = document.getElementById('dentalChartModal');
+      if (!m || m.classList.contains('hidden')) return;
+      clearTimeout(_dcResizeT); _dcResizeT = setTimeout(dcApplyView, 180);
+    });
+    function dcRenderSummary() {
+      var p = allPatients[dcCurrentPid]; if (!p) return;
+      var counts = { caries:0, filled:0, root:0, crowned:0, bridge:0, implant:0, extracted:0, missing:0, impacted:0 };
+      var attention = 0;
+      DC_UPPER.concat(DC_LOWER).forEach(function(f) {
+        var d = dcDerive(p, f);
+        if (d.existence === 'extracted') counts.extracted++;
+        else if (d.existence === 'missing') counts.missing++;
+        else {
+          if (d.existence === 'implant') counts.implant++;
+          if (d.coverage === 'crowned') counts.crowned++;
+          if (d.coverage === 'bridge') counts.bridge++;
+          if (d.endo) counts.root++;
+          if (d.impacted) counts.impacted++;
+          if (d.hasCaries) counts.caries++;
+          if (d.hasFilling) counts.filled++;
+        }
+        if (d.attention) attention++;
+      });
+      var order = ['caries', 'filled', 'root', 'crowned', 'bridge', 'implant', 'extracted', 'missing', 'impacted'];
+      var html = order.filter(function(k){ return counts[k]; }).map(function(k) {
+        var st = DC_STATUS[k];
+        return '<span class="dc-sum-chip" style="border-color:' + st.bd + '55;"><span class="dc-legend-dot" style="background:' + st.bg + ';border-color:' + st.bd + ';"></span>' + st.label + ' <b style="color:' + st.bd + ';">' + counts[k] + '</b></span>';
+      }).join('');
+      if (attention) html += '<span class="dc-sum-chip" style="border-color:#f9731655;color:#c2410c;"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg> يحتاج انتباه <b style="color:#f97316;">' + attention + '</b></span>';
+      if (!html) html = '<span class="dc-sum-chip" style="border-color:#0d948855;color:#0f766e;"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="#0d9488" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"/><path d="m8.5 12.5 2.5 2.5 4.5-5.5"/></svg> جميع الأسنان سليمة</span>';
+      document.getElementById('dcSummary').innerHTML = html;
+    }
+    function dcRenderLegend() {
+      function chip(k) {
+        var ev = DC_EVENTS[k]; if (!ev) return '';
+        var st = DC_STATUS[k];
+        var bg = st ? st.bg : (ev.color + '22');
+        var bd = st ? st.bd : ev.color;
+        return '<span class="dc-legend-item"><span class="dc-legend-dot" style="background:' + bg + ';border-color:' + bd + ';"></span>' + ev.label + '</span>';
+      }
+      document.getElementById('dcLegend').innerHTML =
+          '<div class="dc-legend-group"><span class="dc-legend-gt">موجودات</span><div class="dc-legend-row">' + DC_FINDINGS.map(chip).join('') + '</div></div>'
+        + '<div class="dc-legend-group"><span class="dc-legend-gt">معالجات</span><div class="dc-legend-row">' + DC_TREATMENTS.map(chip).join('') + '</div></div>';
+    }
+    function dcEventDef(e) {
+      return DC_EVENTS[e.type] || (e.to && DC_STATUS[e.to] ? { label: e.action || DC_STATUS[e.to].label, color: DC_STATUS[e.to].bd, kind: 'legacy' } : { label: e.action || 'حدث', color: '#64748b', kind: 'legacy' });
+    }
+    function _dcKindTxt(def){ return def.kind === 'finding' ? 'موجود' : (def.kind === 'treatment' ? 'معالجة' : ''); }
+    function _dcKindCls(def){ return def.kind === 'finding' ? 'find' : (def.kind === 'treatment' ? 'treat' : ''); }
+    // بند واحد داخل بطاقة الجلسة (يظهر عند الفتح)
+    function _dcEvItem(e){
+      var def = dcEventDef(e);
+      var kt = _dcKindTxt(def);
+      return '<div class="dc-ev-item">'
+        + '<span class="dc-ev-dot" style="background:' + def.color + ';"></span>'
+        + (kt ? '<span class="dc-ev-kind ' + _dcKindCls(def) + '">' + kt + '</span>' : '')
+        + '<span class="dc-ev-label">' + escapeHtml(def.label) + '</span>'
+        + (e.surfaces && e.surfaces.length ? '<span class="dc-ev-surf">[' + escapeHtml(e.surfaces.join('،')) + ']</span>' : '')
+        + (e.ts ? '<button class="dc-ev-del" onclick="event.stopPropagation();dcDeleteEvent(' + e.ts + ')" title="حذف هذا البند"><i class="fas fa-trash"></i></button>' : '')
+        + '</div>';
+    }
+    function dcRenderEvents() {
+      var p = allPatients[dcCurrentPid]; if (!p) return;
+      var all = (p.dentalEvents || []).slice().sort(function(a, b) {
+        var d = (b.date || '').localeCompare(a.date || '');
+        return d !== 0 ? d : ((b.ts || 0) - (a.ts || 0));
+      });
+      document.getElementById('dcEventsCount').textContent = '(' + all.length + ')';
+      var box = document.getElementById('dcEventsList');
+      if (!all.length) { box.innerHTML = '<div class="dc-ev-empty">لا توجد أحداث بعد — اضغط على أي سن لتسجيل أول حدث</div>'; return; }
+      // تجميع حسب الجلسة: نفس السنّ + نفس التاريخ = بطاقة واحدة قابلة للفتح
+      var groups = [], byKey = {};
+      all.forEach(function(e) {
+        var key = e.tooth + '|' + (e.date || '');
+        var g = byKey[key];
+        if (!g) { g = byKey[key] = { tooth: e.tooth, date: e.date, items: [], maxTs: 0 }; groups.push(g); }
+        g.items.push(e);
+        if ((e.ts || 0) > g.maxTs) g.maxTs = e.ts || 0;
+      });
+      box.innerHTML = groups.slice(0, 40).map(function(g) {
+        var tName = (typeof dcToothName === 'function') ? dcToothName(g.tooth) : '';
+        // لون العقدة: لون آخر معالجة إن وُجدت، وإلّا آخر موجود
+        var treat = g.items.filter(function(e){ return dcEventDef(e).kind === 'treatment'; })[0];
+        var clr = dcEventDef(treat || g.items[0]).color;
+        // ملخّص مطويّ: رقاقة لكل بند (موجود ومعالجة معاً — لا المعالجة وحدها)
+        var chips = g.items.map(function(e) {
+          var def = dcEventDef(e);
+          return '<span class="dc-ev-chip ' + _dcKindCls(def) + '"><span class="dc-ev-dot" style="background:' + def.color + ';"></span>' + escapeHtml(def.label) + '</span>';
+        }).join('');
+        var note = (g.items.find(function(e){ return e.note && e.note.trim(); }) || {}).note || '';
+        return '<details class="dc-ev">'
+          + '<summary class="dc-ev-sum" style="--dc-ev-clr:' + clr + ';">'
+            + '<span class="dc-ev-tooth">' + escapeHtml(String(g.tooth)) + '</span>'
+            + '<span class="dc-ev-hd">'
+              + '<span class="dc-ev-tname">' + escapeHtml(tName) + '</span>'
+              + '<span class="dc-ev-chips">' + chips + '</span>'
+            + '</span>'
+            + '<span class="dc-ev-date">' + formatDateAr(g.date) + '</span>'
+            + '<i class="fas fa-chevron-down dc-ev-caret"></i>'
+          + '</summary>'
+          + '<div class="dc-ev-det">'
+            + g.items.map(_dcEvItem).join('')
+            + (note ? '<div class="dc-ev-note">' + escapeHtml(note) + '</div>' : '')
+          + '</div>'
+        + '</details>';
+      }).join('');
+    }
+    window.openDentalChart = function(pid) {
+      var p = allPatients[pid]; if (!p) { showToast('اختر مريضاً أولاً', 'error'); return; }
+      dcCurrentPid = pid;
+      // ضمان معرّف ts لكل حدث قديم حتى يكون قابلاً للحذف
+      (p.dentalEvents || []).forEach(function(e, i) { if (!e.ts) e.ts = ((new Date(e.date || 0).getTime()) || 0) + i + 1; });
+      document.getElementById('dcPatientName').textContent = (p.name || '') + ' — اضغط على السن لعرض تاريخه وتسجيل حدث';
+      dcRenderLegend(); dcApplyView(); dcRenderEvents();
+      document.getElementById('dentalChartModal').classList.remove('hidden');
+    };
+    window.closeDentalChart = function() { document.getElementById('dentalChartModal').classList.add('hidden'); };
+    window.openDentalChartFromEditor = function() {
+      var pid = document.getElementById('notePatientId').value;
+      if (pid) openDentalChart(pid);
+    };
+
+    // ═══════════════ 🩺 العمليات الجراحية ═══════════════
+    // نموذج: p.surgeries = [{ ts, name, date, status:'scheduled'|'done', note, complications }]
+    var _sgPid = null, _sgMode = 'schedule', _sgEditingTs = null;
+
+    function _surgeryEnabled() { return !!(settings && settings.surgicalArchive); }
+    // عدد العمليات المجدولة التي مرّ موعدها (تنتظر تأكيد الطبيب)
+    function _surgeryOverdue(p) {
+      return ((p && p.surgeries) || []).filter(function(s) {
+        return s.status === 'scheduled' && s.date && s.date < todayStr;
+      }).length;
+    }
+    window._surgeryUpdateBadge = function(pid) {
+      var btn = document.getElementById('surgeryArchiveBtn');
+      var badge = document.getElementById('surgeryBadge');
+      if (!btn) return;
+      btn.style.display = _surgeryEnabled() ? 'flex' : 'none';
+      if (!badge) return;
+      var n = _surgeryOverdue(allPatients[pid]);
+      if (n > 0) { badge.textContent = n; badge.style.display = 'flex'; }
+      else { badge.style.display = 'none'; }
+    };
+
+    window.openSurgeryPage = function(pid) {
+      var p = allPatients[pid]; if (!p) { showToast('اختر مريضاً أولاً', 'error'); return; }
+      _sgPid = pid;
+      document.getElementById('surgeryPatientName').textContent = (p.name || '') + ' — سجلّ العمليات والمواعيد الجراحية';
+      surgeryResetForm();
+      renderSurgeries(pid);
+      document.getElementById('surgeryPageModal').classList.remove('hidden');
+    };
+    window.closeSurgeryPage = function() {
+      document.getElementById('surgeryPageModal').classList.add('hidden');
+      // حدّث زرّ/شارة الاضبارة إن كانت مفتوحة تحت الشاشة
+      if (_sgPid) _surgeryUpdateBadge(_sgPid);
+    };
+
+    function renderSurgeries(pid) {
+      var p = allPatients[pid]; if (!p) return;
+      var all = (p.surgeries || []);
+      var sched = all.filter(function(s){ return s.status !== 'done'; })
+                     .sort(function(a, b){ return (a.date || '').localeCompare(b.date || ''); });
+      var done  = all.filter(function(s){ return s.status === 'done'; })
+                     .sort(function(a, b){ if (!a.date) return 1; if (!b.date) return -1; return b.date.localeCompare(a.date); });
+
+      document.getElementById('surgeryScheduledCount').textContent = sched.length ? '(' + sched.length + ')' : '';
+      document.getElementById('surgeryDoneCount').textContent = done.length ? '(' + done.length + ')' : '';
+      document.getElementById('surgeryScheduledCard').style.display = sched.length ? '' : 'none';
+
+      document.getElementById('surgeryScheduledList').innerHTML = sched.map(function(s) {
+        var overdue = s.date && s.date < todayStr;
+        return '<div class="sg-sched' + (overdue ? ' overdue' : '') + '">'
+          + '<div class="sg-row"><div style="min-width:0;"><div class="sg-name">' + escapeHtml(s.name || 'عملية') + '</div>'
+          + '<div class="sg-date"><i class="fas fa-calendar-day"></i>' + (s.date ? formatDateAr(s.date) : 'بلا تاريخ') + '</div>'
+          + (s.fromVisitDate ? '<div class="sg-fromvisit"><i class="fas fa-link"></i> من زيارة ' + formatDateAr(s.fromVisitDate) + '</div>' : '') + '</div>'
+          + '<div class="sg-right">' + (overdue ? '<span class="sg-pill amber">مرّ موعدها</span>' : '<span class="sg-pill blue">مجدولة</span>')
+          + '<button class="sg-ibtn" title="تعديل" onclick="editSurgery(' + s.ts + ')"><i class="fas fa-pen"></i></button></div></div>'
+          + (overdue
+              ? '<div class="sg-prompt"><div class="q"><i class="fas fa-clock"></i> هل تمّت هذه العملية؟</div><div class="sg-prompt-row">'
+                + '<button class="sg-pbtn done" onclick="markSurgeryDone(' + s.ts + ')">تمّت</button>'
+                + '<button class="sg-pbtn post" onclick="postponeSurgery(' + s.ts + ')">أُجّلت</button>'
+                + '<button class="sg-pbtn cancel" onclick="cancelSurgery(' + s.ts + ')">أُلغيت</button>'
+                + '</div></div>'
+              : '')
+          + '</div>';
+      }).join('');
+
+      document.getElementById('surgeryDoneList').innerHTML = done.length ? done.map(function(s) {
+        return '<div class="sg-done"><div class="sg-row"><div style="min-width:0;"><div class="sg-name">' + escapeHtml(s.name || 'عملية') + '</div>'
+          + '<div class="sg-date"><i class="fas fa-calendar-day"></i>' + (s.date ? formatDateAr(s.date) : 'بلا تاريخ') + '</div>'
+          + (s.fromVisitDate ? '<div class="sg-fromvisit"><i class="fas fa-link"></i> من زيارة ' + formatDateAr(s.fromVisitDate) + '</div>' : '') + '</div>'
+          + '<div class="sg-acts"><button class="sg-ibtn" title="تعديل" onclick="editSurgery(' + s.ts + ')"><i class="fas fa-pen"></i></button>'
+          + '<button class="sg-ibtn del" title="حذف" onclick="deleteSurgery(' + s.ts + ')"><i class="fas fa-trash"></i></button></div></div>'
+          + (s.complications ? '<div class="sg-note comp"><b>المضاعفات:</b> ' + escapeHtml(s.complications) + '</div>' : '')
+          + (s.note ? '<div class="sg-note">' + escapeHtml(s.note) + '</div>' : '')
+          + '</div>';
+      }).join('') : '<div class="sg-empty"><i class="fas fa-folder-open"></i>لا سوابق جراحية مسجّلة بعد.</div>';
+
+      _surgeryUpdateBadge(pid);
+    }
+
+    function _sgApplyMode() {
+      var isDone = (_sgMode === 'done');
+      document.getElementById('sgModeSchedule').classList.toggle('active', !isDone);
+      document.getElementById('sgModePast').classList.toggle('active', isDone);
+      document.getElementById('sgDateLabel').textContent = isDone ? 'تاريخ العملية' : 'تاريخ العملية المجدول';
+      document.getElementById('sgCompWrap').style.display = isDone ? '' : 'none';
+      document.getElementById('sgSaveLabel').textContent = isDone ? 'حفظ العملية' : 'جدولة';
+      document.getElementById('sgCancelBtn').style.display = (_sgEditingTs != null) ? '' : 'none';
+    }
+    // أزرار المبدّل: تبدأ إدخالاً جديداً بالنوع المختار
+    window.surgerySetMode = function(mode) {
+      _sgEditingTs = null; _sgMode = (mode === 'past') ? 'done' : 'schedule';
+      _sgClearInputs(); _sgApplyMode();
+      document.getElementById('sgName').focus();
+    };
+    function _sgClearInputs() {
+      document.getElementById('sgName').value = '';
+      document.getElementById('sgDate').value = '';
+      document.getElementById('sgComp').value = '';
+      document.getElementById('sgNote').value = '';
+      _sgGrow();
+    }
+    function _sgGrow() {
+      if (typeof veAutoGrow === 'function') {
+        veAutoGrow(document.getElementById('sgComp'));
+        veAutoGrow(document.getElementById('sgNote'));
+      }
+    }
+    window.surgeryResetForm = function() {
+      _sgEditingTs = null; _sgMode = 'schedule';
+      _sgClearInputs(); _sgApplyMode();
+    };
+    function _sgFind(ts) {
+      var p = allPatients[_sgPid]; if (!p || !p.surgeries) return null;
+      for (var i = 0; i < p.surgeries.length; i++) if (p.surgeries[i].ts === ts) return p.surgeries[i];
+      return null;
+    }
+    function _sgLoad(s) {
+      document.getElementById('sgName').value = s.name || '';
+      document.getElementById('sgDate').value = s.date || '';
+      document.getElementById('sgComp').value = s.complications || '';
+      document.getElementById('sgNote').value = s.note || '';
+      _sgGrow(); _sgApplyMode();
+      document.querySelector('#surgeryPageModal .sg-side').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    // «تمّت» → نموذج الإكمال (done) لتوثيق المضاعفات
+    window.markSurgeryDone = function(ts) {
+      var s = _sgFind(ts); if (!s) return;
+      // النموذج يفتح بوضع «تمّت» بتاريخ العملية المجدول كافتراض للتاريخ الفعلي،
+      // ويظهر حقل المضاعفات. الطبيب يعدّل التاريخ إن اختلف ثم يحفظ.
+      _sgEditingTs = ts; _sgMode = 'done';
+      _sgLoad(s);
+      document.getElementById('sgComp').focus();
+    };
+    // «أُجّلت» → تعديل التاريخ (يبقى مجدولاً)
+    window.postponeSurgery = function(ts) {
+      var s = _sgFind(ts); if (!s) return;
+      _sgEditingTs = ts; _sgMode = 'schedule';
+      _sgLoad(s);
+      document.getElementById('sgDate').focus();
+    };
+    window.editSurgery = function(ts) {
+      var s = _sgFind(ts); if (!s) return;
+      _sgEditingTs = ts; _sgMode = (s.status === 'done') ? 'done' : 'schedule';
+      _sgLoad(s);
+      document.getElementById('sgName').focus();
+    };
+    window.cancelSurgery = function(ts) {
+      if (!confirm('تأكيد إلغاء هذه العملية المجدولة؟')) return;
+      _sgRemove(ts, 'أُلغيت العملية المجدولة');
+    };
+    window.deleteSurgery = function(ts) {
+      if (!confirm('حذف هذه العملية من سوابق المريض؟\nلا يمكن التراجع.')) return;
+      _sgRemove(ts, 'تم الحذف');
+    };
+    function _sgRemove(ts, msg) {
+      var p = allPatients[_sgPid]; if (!p || !p.surgeries) return;
+      p.surgeries = p.surgeries.filter(function(s){ return s.ts !== ts; });
+      if (_sgEditingTs === ts) surgeryResetForm();
+      _sgSave(p, msg);
+      renderSurgeries(_sgPid);
+    }
+    window.saveSurgery = function() {
+      var p = allPatients[_sgPid]; if (!p) return;
+      var name = document.getElementById('sgName').value.trim();
+      if (!name) { showToast('اكتب اسم العملية أولاً', 'error'); document.getElementById('sgName').focus(); return; }
+      var date = document.getElementById('sgDate').value;
+      var note = document.getElementById('sgNote').value.trim();
+      var comp = document.getElementById('sgComp').value.trim();
+      var status = (_sgMode === 'done') ? 'done' : 'scheduled';
+      if (!p.surgeries) p.surgeries = [];
+      if (_sgEditingTs != null) {
+        var s = _sgFind(_sgEditingTs);
+        if (s) { s.name = name; s.date = date; s.note = note; s.complications = (status === 'done') ? comp : ''; s.status = status; }
+      } else {
+        p.surgeries.push({ ts: Date.now(), name: name, date: date, note: note, complications: (status === 'done') ? comp : '', status: status });
+      }
+      _sgSave(p, status === 'done' ? 'تم حفظ العملية ✓' : 'تمّت جدولة العملية ✓');
+      surgeryResetForm();
+      renderSurgeries(_sgPid);
+    };
+    function _sgSave(p, msg) {
+      window._fb.setDoc(window._fb.docRef('patients', _sgPid), p, { merge: true })
+        .then(function(){ if (msg) showToast(msg, 'success'); })
+        .catch(function(e){ showToast('فشل الحفظ', 'error'); console.error(e); });
+    }
+    // نموّ حقلَي النصّ مع الكتابة
+    document.addEventListener('DOMContentLoaded', function() {
+      ['sgComp', 'sgNote'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el && typeof veAutoGrow === 'function') el.addEventListener('input', function(){ veAutoGrow(el); });
+      });
+    });
+
+    // ── جدولة عملية مرتبطة من داخل محرّر الزيارة ──
+    window.veToggleSurgery = function(checked) {
+      var wrap = document.getElementById('veSurgeryWrap');
+      if (wrap) wrap.style.display = checked ? '' : 'none';
+      if (checked) { var n = document.getElementById('veSurgeryName'); if (n) n.focus(); }
+    };
+    // تُستدعى عند فتح المحرّر: تُظهر البطاقة وتملؤها من العملية المجدولة المرتبطة بالزيارة
+    function _veLoadSurgery(p, v) {
+      var card = document.getElementById('veSurgeryCard');
+      if (!card) return;
+      if (!_surgeryEnabled()) { card.style.display = 'none'; return; }
+      card.style.display = '';
+      var linked = v.vid ? ((p.surgeries || []).filter(function(s){ return s.visitTs === v.vid && s.status === 'scheduled'; })[0]) : null;
+      var toggle = document.getElementById('veSurgeryToggle');
+      var wrap = document.getElementById('veSurgeryWrap');
+      var nameEl = document.getElementById('veSurgeryName');
+      var dateEl = document.getElementById('veSurgeryDate');
+      if (linked) {
+        toggle.checked = true; wrap.style.display = '';
+        nameEl.value = linked.name || ''; dateEl.value = linked.date || '';
+      } else {
+        toggle.checked = false; wrap.style.display = 'none';
+        nameEl.value = ''; dateEl.value = '';
+      }
+    }
+    // تُستدعى عند حفظ الزيارة: تنشئ/تحدّث/تحذف العملية المجدولة المرتبطة بها
+    function _veFlushSurgery(p, v) {
+      if (!_surgeryEnabled()) return;
+      var toggle = document.getElementById('veSurgeryToggle');
+      var nameEl = document.getElementById('veSurgeryName');
+      if (!toggle || !nameEl) return;
+      var name = (nameEl.value || '').trim();
+      var date = (document.getElementById('veSurgeryDate') || {}).value || '';
+      if (!p.surgeries) p.surgeries = [];
+      var idx = -1;
+      if (v.vid) for (var i = 0; i < p.surgeries.length; i++) {
+        if (p.surgeries[i].visitTs === v.vid && p.surgeries[i].status === 'scheduled') { idx = i; break; }
+      }
+      if (toggle.checked && name) {
+        if (!v.vid) v.vid = Date.now();
+        if (idx >= 0) {
+          p.surgeries[idx].name = name; p.surgeries[idx].date = date; p.surgeries[idx].fromVisitDate = v.date || '';
+        } else {
+          p.surgeries.push({ ts: Date.now(), name: name, date: date, note: '', complications: '', status: 'scheduled', visitTs: v.vid, fromVisitDate: v.date || '' });
+        }
+      } else if (idx >= 0) {
+        // أُلغيت الجدولة من المحرّر — تُحذف المجدولة المرتبطة (المكتملة لا تُمَسّ)
+        p.surgeries.splice(idx, 1);
+      }
+    }
+
+    // ═══════════════ 🦷 تقويم الأسنان ═══════════════
+    // يحاكي نظام العمليات؛ لكنه علاج ممتدّ: دورة نشطة فيها مواعيد شدّ ثم تُنهى.
+    // p.ortho = [{ ts, type, startDate, expectedMonths, status:'active'|'completed',
+    //             endDate, notes, visitTs?, fromVisitDate?, adjustments:[{ts,date,note}] }]
+    var _orPid = null, _orEditingTs = null, _orAdjOpen = null;
+    function _orTypeLabel(t) { return t === 'removable' ? 'تقويم متحرّك' : t === 'clear' ? 'تقويم شفّاف' : 'تقويم ثابت'; }
+    // التقويم ميزة اختيارية تُفعّل من قسم التخصّص (للأسنان فقط) — لا تلقائياً بالتخصّص
+    function _orthoEnabled() { return !!(settings && settings.orthoArchive); }
+
+    window._orthoUpdateBadge = function(pid) {
+      var btn = document.getElementById('orthoArchiveBtn');
+      var badge = document.getElementById('orthoBadge');
+      if (!btn) return;
+      btn.style.display = _orthoEnabled() ? 'flex' : 'none';
+      if (!badge) return;
+      var n = ((allPatients[pid] || {}).ortho || []).filter(function(o){ return o.status === 'active'; }).length;
+      if (n > 0) { badge.textContent = n; badge.style.display = 'flex'; }
+      else { badge.style.display = 'none'; }
+    };
+
+    window.openOrthoPage = function(pid) {
+      var p = allPatients[pid]; if (!p) { showToast('اختر مريضاً أولاً', 'error'); return; }
+      _orPid = pid; _orAdjOpen = null;
+      document.getElementById('orthoPatientName').textContent = (p.name || '') + ' — دورات التقويم ومواعيد الشدّ';
+      orthoResetForm();
+      renderOrtho(pid);
+      document.getElementById('orthoPageModal').classList.remove('hidden');
+    };
+    window.closeOrthoPage = function() {
+      document.getElementById('orthoPageModal').classList.add('hidden');
+      if (_orPid) _orthoUpdateBadge(_orPid);
+    };
+
+    function renderOrtho(pid) {
+      var p = allPatients[pid]; if (!p) return;
+      var all = (p.ortho || []);
+      var active = all.filter(function(o){ return o.status !== 'completed'; })
+                      .sort(function(a, b){ return (b.startDate || '').localeCompare(a.startDate || ''); });
+      var done   = all.filter(function(o){ return o.status === 'completed'; })
+                      .sort(function(a, b){ return (b.endDate || '').localeCompare(a.endDate || ''); });
+
+      document.getElementById('orthoActiveCount').textContent = active.length ? '(' + active.length + ')' : '';
+      document.getElementById('orthoDoneCount').textContent = done.length ? '(' + done.length + ')' : '';
+      document.getElementById('orthoActiveCard').style.display = active.length ? '' : 'none';
+
+      document.getElementById('orthoActiveList').innerHTML = active.map(function(o) {
+        var open = (_orAdjOpen === o.ts);
+        var adjs = (o.adjustments || []).slice().sort(function(a, b){ return (b.date || '').localeCompare(a.date || ''); });
+        return '<div class="sg-sched">'
+          + '<div class="sg-row"><div style="min-width:0;"><div class="sg-name">' + _orTypeLabel(o.type) + '</div>'
+          + '<div class="or-meta"><span class="or-chip"><b>البدء:</b> ' + (o.startDate ? formatDateAr(o.startDate) : '—') + '</span>'
+          + (o.expectedMonths ? '<span class="or-chip"><b>المدّة:</b> ' + o.expectedMonths + ' شهر</span>' : '')
+          + '<span class="or-chip"><b>جلسات الشدّ:</b> ' + adjs.length + '</span></div>'
+          + (o.fromVisitDate ? '<div class="sg-fromvisit"><i class="fas fa-link"></i> من زيارة ' + formatDateAr(o.fromVisitDate) + '</div>' : '') + '</div>'
+          + '<div class="sg-right"><span class="sg-pill blue">نشط</span>'
+          + '<button class="sg-ibtn" title="تعديل" onclick="editOrtho(' + o.ts + ')"><i class="fas fa-pen"></i></button></div></div>'
+          + (o.notes ? '<div class="sg-note">' + escapeHtml(o.notes) + '</div>' : '')
+          + '<div class="or-adj-head"><span class="t">مواعيد الشدّ</span>'
+          + '<button class="or-addbtn" onclick="addOrthoAdjustment(' + o.ts + ')"><i class="fas fa-plus"></i> موعد شدّ</button></div>'
+          + (open ? '<div class="or-adj-form open">'
+              + '<div class="fld"><label>التاريخ</label><input type="date" id="orAdjDate" value="' + todayStr + '"></div>'
+              + '<div class="fld" style="flex:1;min-width:120px;"><label>ملاحظة</label><input type="text" id="orAdjNote" placeholder="ما تمّ في الجلسة..."></div>'
+              + '<button class="or-addbtn" onclick="saveOrthoAdjustment(' + o.ts + ')"><i class="fas fa-check"></i> حفظ</button></div>' : '')
+          + (adjs.length ? '<div class="or-adj-tl">' + adjs.map(function(a) {
+              return '<div class="or-adj"><div class="or-adj-row"><div style="min-width:0;"><div class="or-adj-date">' + formatDateAr(a.date) + '</div>'
+                + (a.note ? '<div class="or-adj-note">' + escapeHtml(a.note) + '</div>' : '') + '</div>'
+                + '<button class="sg-ibtn del" title="حذف" onclick="deleteOrthoAdjustment(' + o.ts + ',' + a.ts + ')"><i class="fas fa-trash"></i></button></div></div>';
+            }).join('') + '</div>' : '')
+          + '<div style="margin-top:12px;"><button class="sg-pbtn done" onclick="completeOrtho(' + o.ts + ')"><i class="fas fa-flag-checkered"></i> إنهاء التقويم</button></div>'
+          + '</div>';
+      }).join('');
+
+      document.getElementById('orthoDoneList').innerHTML = done.length ? done.map(function(o) {
+        var adjs = (o.adjustments || []);
+        return '<div class="sg-done"><div class="sg-row"><div style="min-width:0;"><div class="sg-name">' + _orTypeLabel(o.type) + '</div>'
+          + '<div class="sg-date"><i class="fas fa-calendar-day"></i>' + (o.startDate ? formatDateAr(o.startDate) : '—') + (o.endDate ? ' ← ' + formatDateAr(o.endDate) : '') + '</div>'
+          + (o.fromVisitDate ? '<div class="sg-fromvisit"><i class="fas fa-link"></i> من زيارة ' + formatDateAr(o.fromVisitDate) + '</div>' : '') + '</div>'
+          + '<div class="sg-acts"><button class="sg-ibtn del" title="حذف" onclick="deleteOrtho(' + o.ts + ')"><i class="fas fa-trash"></i></button></div></div>'
+          + '<div class="sg-note"><b>جلسات الشدّ:</b> ' + adjs.length + (o.notes ? ' · ' + escapeHtml(o.notes) : '') + '</div>'
+          + '</div>';
+      }).join('') : '<div class="sg-empty"><i class="fas fa-folder-open"></i>لا دورات تقويم منتهية بعد.</div>';
+
+      _orthoUpdateBadge(pid);
+    }
+
+    function _orGrow() { if (typeof veAutoGrow === 'function') veAutoGrow(document.getElementById('orNotes')); }
+    window.orthoResetForm = function() {
+      _orEditingTs = null;
+      document.getElementById('orType').value = 'fixed';
+      document.getElementById('orStart').value = '';
+      document.getElementById('orMonths').value = '';
+      document.getElementById('orNotes').value = '';
+      document.getElementById('orSaveLabel').textContent = 'بدء التقويم';
+      document.getElementById('orCancelBtn').style.display = 'none';
+      _orGrow();
+    };
+    function _orFind(ts) {
+      var p = allPatients[_orPid]; if (!p || !p.ortho) return null;
+      for (var i = 0; i < p.ortho.length; i++) if (p.ortho[i].ts === ts) return p.ortho[i];
+      return null;
+    }
+    window.editOrtho = function(ts) {
+      var o = _orFind(ts); if (!o) return;
+      _orEditingTs = ts;
+      document.getElementById('orType').value = o.type || 'fixed';
+      document.getElementById('orStart').value = o.startDate || '';
+      document.getElementById('orMonths').value = o.expectedMonths || '';
+      document.getElementById('orNotes').value = o.notes || '';
+      document.getElementById('orSaveLabel').textContent = 'حفظ';
+      document.getElementById('orCancelBtn').style.display = '';
+      _orGrow();
+      document.querySelector('#orthoPageModal .sg-side').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    };
+    window.saveOrtho = function() {
+      var p = allPatients[_orPid]; if (!p) return;
+      var type = document.getElementById('orType').value;
+      var start = document.getElementById('orStart').value;
+      var months = parseInt(document.getElementById('orMonths').value, 10) || '';
+      var notes = document.getElementById('orNotes').value.trim();
+      if (!p.ortho) p.ortho = [];
+      if (_orEditingTs != null) {
+        var o = _orFind(_orEditingTs);
+        if (o) { o.type = type; o.startDate = start; o.expectedMonths = months; o.notes = notes; }
+      } else {
+        p.ortho.push({ ts: Date.now(), type: type, startDate: start, expectedMonths: months, notes: notes, status: 'active', adjustments: [] });
+      }
+      _orSave(p, 'تم حفظ التقويم ✓');
+      orthoResetForm();
+      renderOrtho(_orPid);
+    };
+    window.completeOrtho = function(ts) {
+      var o = _orFind(ts); if (!o) return;
+      if (!confirm('إنهاء دورة التقويم هذه؟')) return;
+      o.status = 'completed'; o.endDate = todayStr;
+      if (_orEditingTs === ts) orthoResetForm();
+      _orSave(allPatients[_orPid], 'انتهى التقويم ✓');
+      renderOrtho(_orPid);
+    };
+    window.deleteOrtho = function(ts) {
+      if (!confirm('حذف دورة التقويم هذه نهائياً؟\nلا يمكن التراجع.')) return;
+      var p = allPatients[_orPid]; if (!p || !p.ortho) return;
+      p.ortho = p.ortho.filter(function(o){ return o.ts !== ts; });
+      if (_orEditingTs === ts) orthoResetForm();
+      _orSave(p, 'تم الحذف');
+      renderOrtho(_orPid);
+    };
+    window.addOrthoAdjustment = function(ts) {
+      _orAdjOpen = (_orAdjOpen === ts) ? null : ts;
+      renderOrtho(_orPid);
+      if (_orAdjOpen === ts) { var n = document.getElementById('orAdjNote'); if (n) n.focus(); }
+    };
+    window.saveOrthoAdjustment = function(ts) {
+      var o = _orFind(ts); if (!o) return;
+      var date = (document.getElementById('orAdjDate') || {}).value || todayStr;
+      var note = ((document.getElementById('orAdjNote') || {}).value || '').trim();
+      if (!o.adjustments) o.adjustments = [];
+      o.adjustments.push({ ts: Date.now(), date: date, note: note });
+      _orAdjOpen = null;
+      _orSave(allPatients[_orPid], 'سُجّل موعد الشدّ ✓');
+      renderOrtho(_orPid);
+    };
+    window.deleteOrthoAdjustment = function(ts, adjTs) {
+      var o = _orFind(ts); if (!o || !o.adjustments) return;
+      o.adjustments = o.adjustments.filter(function(a){ return a.ts !== adjTs; });
+      _orSave(allPatients[_orPid], 'حُذف موعد الشدّ');
+      renderOrtho(_orPid);
+    };
+    function _orSave(p, msg) {
+      window._fb.setDoc(window._fb.docRef('patients', _orPid), p, { merge: true })
+        .then(function(){ if (msg) showToast(msg, 'success'); })
+        .catch(function(e){ showToast('فشل الحفظ', 'error'); console.error(e); });
+    }
+    document.addEventListener('DOMContentLoaded', function() {
+      var el = document.getElementById('orNotes');
+      if (el && typeof veAutoGrow === 'function') el.addEventListener('input', function(){ veAutoGrow(el); });
+    });
+
+    // ── بدء تقويم مرتبط من داخل محرّر الزيارة (لتخصّص الأسنان) ──
+    window.veToggleOrtho = function(checked) {
+      var wrap = document.getElementById('veOrthoWrap');
+      if (wrap) wrap.style.display = checked ? '' : 'none';
+    };
+    // رقائق راديو لنوع جهاز التقويم — تكتب في الحقل المخفيّ #veOrthoType
+    window._veSetOrthoType = function(val) {
+      var hid = document.getElementById('veOrthoType'); if (hid) hid.value = val;
+      var set = document.querySelector('#veOrthoWrap .ve-chipset'); if (!set) return;
+      Array.prototype.forEach.call(set.querySelectorAll('.ve-chip'), function(c) {
+        var on = c.getAttribute('data-val') === val;
+        c.classList.toggle('active', on);
+        c.setAttribute('aria-checked', on ? 'true' : 'false');
+      });
+    };
+    function _veLoadOrtho(p, v) {
+      var card = document.getElementById('veOrthoCard');
+      if (!card) return;
+      if (!_orthoEnabled()) { card.style.display = 'none'; return; }
+      card.style.display = '';
+      var linked = v.vid ? ((p.ortho || []).filter(function(o){ return o.visitTs === v.vid && o.status === 'active'; })[0]) : null;
+      var toggle = document.getElementById('veOrthoToggle');
+      var wrap = document.getElementById('veOrthoWrap');
+      var typeEl = document.getElementById('veOrthoType');
+      var dateEl = document.getElementById('veOrthoDate');
+      if (linked) {
+        toggle.checked = true; wrap.style.display = '';
+        _veSetOrthoType(linked.type || 'fixed'); dateEl.value = linked.startDate || '';
+      } else {
+        toggle.checked = false; wrap.style.display = 'none';
+        _veSetOrthoType('fixed'); dateEl.value = '';
+      }
+    }
+    function _veFlushOrtho(p, v) {
+      if (!_orthoEnabled()) return;
+      var toggle = document.getElementById('veOrthoToggle');
+      if (!toggle) return;
+      var type = (document.getElementById('veOrthoType') || {}).value || 'fixed';
+      var date = (document.getElementById('veOrthoDate') || {}).value || '';
+      if (!p.ortho) p.ortho = [];
+      var idx = -1;
+      if (v.vid) for (var i = 0; i < p.ortho.length; i++) {
+        if (p.ortho[i].visitTs === v.vid && p.ortho[i].status === 'active') { idx = i; break; }
+      }
+      if (toggle.checked) {
+        if (!v.vid) v.vid = Date.now();
+        if (idx >= 0) {
+          p.ortho[idx].type = type; p.ortho[idx].startDate = date; p.ortho[idx].fromVisitDate = v.date || '';
+        } else {
+          p.ortho.push({ ts: Date.now(), type: type, startDate: date, expectedMonths: '', notes: '', status: 'active', adjustments: [], visitTs: v.vid, fromVisitDate: v.date || '' });
+        }
+      } else if (idx >= 0) {
+        // أُلغيت الإشارة من المحرّر — تُحذف الدورة النشطة المرتبطة (المنتهية لا تُمَسّ)
+        p.ortho.splice(idx, 1);
+      }
+    }
+    // ── محرر السن: تسجيل الأحداث ──
+    function teEventBtn(k) {
+      var def = DC_EVENTS[k];
+      var sel = teEventTypes.indexOf(k) !== -1;
+      return '<button class="te-event-btn' + (sel ? ' sel' : '') + '" onclick="teSelectEvent(\'' + k + '\')"'
+        + ' style="' + (sel ? 'border-color:' + def.color + ';background:' + def.color + '12;color:' + def.color + ';' : '') + '">'
+        + '<span class="te-dot" style="background:' + def.color + ';"></span>'
+        + '<span class="te-lbl">' + def.label + '</span></button>';
+    }
+    function teRenderEventGrids() {
+      document.getElementById('teEventsFindings').innerHTML = DC_FINDINGS.map(teEventBtn).join('');
+      document.getElementById('teEventsTreatments').innerHTML = DC_TREATMENTS.map(teEventBtn).join('');
+      teUpdateBadges();
+    }
+    // عدّاد المختار في كل قائمة منسدلة
+    function teUpdateBadges() {
+      var f = 0, t = 0;
+      teEventTypes.forEach(function(k){ if (DC_FINDINGS.indexOf(k) > -1) f++; else if (DC_TREATMENTS.indexOf(k) > -1) t++; });
+      var fb = document.getElementById('teFindBadge'), tb = document.getElementById('teTreatBadge');
+      if (fb) fb.textContent = f ? String(f) : '';
+      if (tb) tb.textContent = t ? String(t) : '';
+    }
+    // فتح/طي القائمة المنسدلة + إعادة تموضع الـ Popover بعد تغيّر الارتفاع
+    window.teToggleDd = function(id) {
+      var dd = document.getElementById(id); if (!dd) return;
+      dd.classList.toggle('open');
+      if (typeof _repositionToothPopover === 'function') { _repositionToothPopover(); setTimeout(function(){ _repositionToothPopover(); }, 280); }
+    };
+    // معاينة السن = الحالة الحالية + الحدث المُختار مطبَّقاً فوقها (بدون حفظ)
+    function teBuildPreview() {
+      var p = allPatients[dcCurrentPid];
+      var d = dcDerive(p, teCurrentTooth);
+      var surfaces = {}; Object.keys(d.surfaces).forEach(function(s){ surfaces[s] = d.surfaces[s]; });
+      var view = { existence: d.existence, coverage: d.coverage, endo: d.endo, impacted: d.impacted, surfaces: surfaces };
+      // معاينة كل الحالات المختارة مطبَّقة فوق الحالة الحالية (تحديد متعدّد)
+      teEventTypes.forEach(function(k) {
+        var def = DC_EVENTS[k]; if (!def) return;
+        switch (def.layer) {
+          case 'reset':     view = { existence:'present', coverage:null, endo:false, impacted:false, surfaces:{} }; break;
+          case 'existence': view.existence = def.exist; view.coverage = null; view.endo = false; view.impacted = false; view.surfaces = {}; break;
+          case 'coverage':  if (view.existence !== 'implant') view.existence = 'present'; view.coverage = def.cover; break;
+          case 'endo':      if (view.existence !== 'implant') view.existence = 'present'; view.endo = true; break;
+          case 'impacted':  view.impacted = true; break;
+          case 'surface':   if (view.existence !== 'implant') view.existence = 'present'; teSurfaces.forEach(function(s){ view.surfaces[s] = def.surf; }); break;
+          default: break; // alert / none: لا تغيير بصري
+        }
+      });
+      return view;
+    }
+    function teRenderBigTooth() {
+      var p = allPatients[dcCurrentPid]; if (!p || teCurrentTooth == null) return;
+      document.getElementById('teBigTooth').innerHTML = dcToothSVG(teCurrentTooth, teBuildPreview(), true);
+      // بطاقة السطوح تظهر فقط عند اختيار حالة سطح (تسوّس/حشوة) — قائمة مبسّطة
+      var surfaceActive = teEventTypes.some(function(k){ return DC_EVENTS[k].layer === 'surface'; });
+      var card = document.getElementById('teSurfaceCard');
+      if (card) card.style.display = surfaceActive ? '' : 'none';
+      var hint = document.getElementById('teSurfaceHint');
+      if (hint) hint.textContent = 'اضغط على السطح المصاب — O مضغ · M أنسي · D وحشي · B شدقي · L لساني';
+    }
+    function teRenderCurrentChip() {
+      var p = allPatients[dcCurrentPid]; if (!p || teCurrentTooth == null) return;
+      var d = dcDerive(p, teCurrentTooth);
+      var st = DC_STATUS[dcPrimaryStatus(d)];
+      var extra = '';
+      if (d.endo && dcPrimaryStatus(d) !== 'root') extra += '<span style="color:#65a30d;">+عصب</span>';
+      if (d.impacted && dcPrimaryStatus(d) !== 'impacted') extra += '<span style="color:#8b5cf6;">+منطمر</span>';
+      document.getElementById('teCurrentChip').innerHTML =
+        '<span style="width:10px;height:10px;border-radius:3px;background:' + st.bg + ';border:2px solid ' + st.bd + ';"></span>'
+        + '<span style="color:' + st.bd + ';">' + st.label + '</span>'
+        + extra
+        + (d.alerts.length ? '<span style="color:#f97316;">⚠</span>' : '');
+      document.getElementById('teSub').textContent = 'الحالة الحالية مشتقة تلقائياً من ' + (d.eventsCount || 0) + ' حدث';
+    }
+    function teRenderHistory() {
+      var p = allPatients[dcCurrentPid]; if (!p) return;
+      var evs = dcToothEvents(p, teCurrentTooth).slice().reverse();
+      document.getElementById('teTlCount').textContent = evs.length ? '(' + evs.length + ')' : '';
+      var box = document.getElementById('teHistory');
+      if (!evs.length) { box.innerHTML = '<div style="color:var(--text-muted);font-size:.78rem;padding:4px 0;">لا يوجد تاريخ مسجل لهذا السن بعد</div>'; return; }
+      box.innerHTML = evs.map(function(e) {
+        var def = dcEventDef(e);
+        return '<div class="dc-tl-item">'
+          + '<span class="dc-tl-dot" style="border-color:' + def.color + ';"></span>'
+          + '<div class="dc-tl-body">'
+            + '<div class="dc-tl-action"><span style="color:' + def.color + ';">' + escapeHtml(def.label) + '</span>'
+            + (e.surfaces && e.surfaces.length ? '<span style="font-size:.68rem;font-weight:800;background:' + def.color + '18;color:' + def.color + ';border-radius:6px;padding:1px 7px;">' + e.surfaces.join('،') + '</span>' : '')
+            + '</div>'
+            + (e.note ? '<div style="font-size:.73rem;color:var(--text-secondary);margin-top:2px;">' + escapeHtml(e.note) + '</div>' : '')
+            + '<div class="dc-tl-meta">' + formatDateAr(e.date) + '</div>'
+          + '</div>'
+          + ((e.ts) ? '<button class="dc-tl-del" onclick="dcDeleteEvent(' + e.ts + ')" title="حذف الحدث"><i class="fas fa-trash"></i></button>' : '')
+          + '</div>';
+      }).join('');
+    }
+    window.openToothEditor = function(fdi, ev) {
+      var p = allPatients[dcCurrentPid]; if (!p) return;
+      teCurrentTooth = fdi;
+      teEventTypes = []; teSurfaces = [];
+      document.getElementById('teTitle').textContent = 'السن ' + fdi + ' — ' + dcToothName(fdi);
+      _setVal('teNote', '');
+      _setVal('teDate', toLocalISODate(new Date()));
+      teRenderEventGrids(); teRenderBigTooth(); teRenderCurrentChip(); teRenderHistory();
+      // إظهار لوحة الإجراءات في العمود الأيمن (بدل الطفو فوق الأسنان)
+      var emp = document.getElementById('teEmpty'), ed = document.getElementById('teEditor');
+      if (emp) emp.style.display = 'none';
+      if (ed) { ed.style.display = ''; ed.style.animation = 'none'; requestAnimationFrame(function(){ ed.style.animation = ''; }); ed.scrollTop = 0; }
+      // على الشاشات الضيّقة: اللوحة أسفل المخطط — انزل إليها
+      if (window.innerWidth < 1024) { var tp = document.getElementById('toothPanel'); if (tp && tp.scrollIntoView) tp.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    };
+    window.closeToothEditor = function() {
+      var emp = document.getElementById('teEmpty'), ed = document.getElementById('teEditor');
+      if (ed) ed.style.display = 'none';
+      if (emp) emp.style.display = '';
+      teCurrentTooth = null; teEventTypes = []; teSurfaces = [];
+    };
+    window.teSelectEvent = function(k) {
+      // تحديد متعدّد: تؤشّر عدّة حالات معاً. حالات الوجود (قلع/مفقود/زرعة/سليم) حصرية.
+      var def = DC_EVENTS[k];
+      var exclusive = (def.layer === 'existence' || def.layer === 'reset');
+      var i = teEventTypes.indexOf(k);
+      if (i !== -1) { teEventTypes.splice(i, 1); }               // إلغاء التحديد
+      else if (exclusive) { teEventTypes = [k]; }                // حالة وجود: حصرية وحدها
+      else {
+        // إضافة حالة عادية: أزِل أي حالة وجود/تصفير سابقة (تناقض)
+        teEventTypes = teEventTypes.filter(function(t){ var d = DC_EVENTS[t]; return !(d.layer === 'existence' || d.layer === 'reset'); });
+        teEventTypes.push(k);
+      }
+      // السطوح تخصّ فقط أحداث الأسطح (تسوّس/حشوة)
+      if (!teEventTypes.some(function(t){ return DC_EVENTS[t].layer === 'surface'; })) teSurfaces = [];
+      teRenderEventGrids(); teRenderBigTooth();
+    };
+    window.dcToggleSurface = function(sf) {
+      if (!teEventTypes.some(function(k){ return DC_EVENTS[k].layer === 'surface'; })) return;
+      var i = teSurfaces.indexOf(sf);
+      if (i === -1) teSurfaces.push(sf); else teSurfaces.splice(i, 1);
+      teRenderBigTooth();
+    };
+    function dcRecomputeTooth(p, fdi) {
+      if (dcToothEvents(p, fdi).length === 0) {
+        p.teeth = p.teeth || {};
+        p.teeth[fdi] = { status: 'healthy', surfaces: [], notes: '' };   // لا أحداث = سن سليم
+      } else {
+        dcCacheDerived(p, fdi);
+      }
+    }
+    function dcCacheDerived(p, fdi) {
+      var d = dcDerive(p, fdi);
+      p.teeth = p.teeth || {};
+      p.teeth[fdi] = {
+        status: dcPrimaryStatus(d),
+        surfaces: Object.keys(d.surfaces),
+        existence: d.existence, coverage: d.coverage, endo: d.endo, impacted: d.impacted,
+        attention: d.attention,
+        notes: (p.teeth[fdi] && p.teeth[fdi].notes) || ''
+      };
+    }
+    function dcPersist(p, okMsg) {
+      window._fb.setDoc(window._fb.docRef('patients', dcCurrentPid), p, { merge: true })
+        .then(function() { if (okMsg) showToast(okMsg, 'success'); })
+        .catch(function(e) { showToast('فشل الحفظ', 'error'); console.error(e); });
+    }
+    window.saveToothEdit = function() {
+      var p = allPatients[dcCurrentPid]; if (!p || teCurrentTooth == null) return;
+      if (!teEventTypes.length) { showToast('اختر حالة واحدة على الأقل', 'error'); return; }
+      var fdi = teCurrentTooth;
+      // أحداث الأسطح (تسوّس/حشوة) تتطلّب تحديد سطح واحد على الأقل
+      var needsSurface = teEventTypes.some(function(k){ return DC_EVENTS[k].layer === 'surface'; });
+      if (needsSurface && !teSurfaces.length) { showToast('حدّد السطح المصاب على الرسمة أولاً', 'error'); return; }
+      var note = _getVal('teNote');
+      var date = _getVal('teDate') || toLocalISODate(new Date());
+      var base = Date.now();
+      p.dentalEvents = p.dentalEvents || [];
+      // حدث مستقل لكل حالة مختارة (ts متتابع يحافظ على ترتيب التطبيق)
+      teEventTypes.forEach(function(k, idx) {
+        var def = DC_EVENTS[k];
+        p.dentalEvents.unshift({
+          tooth: fdi,
+          type: k,
+          action: def.label,
+          surfaces: (def.layer === 'surface') ? teSurfaces.slice() : [],
+          note: note,
+          date: date,
+          ts: base + idx
+        });
+      });
+      if (p.dentalEvents.length > 500) p.dentalEvents = p.dentalEvents.slice(0, 500);
+      dcCacheDerived(p, fdi);
+      var cnt = teEventTypes.length;
+      dcPersist(p, 'السن ' + fdi + ': حُفظت ' + cnt + (cnt === 1 ? ' حالة' : ' حالات'));
+      // إبقاء المحرر مفتوحاً لتسجيل حالات إضافية
+      teEventTypes = []; teSurfaces = []; _setVal('teNote', '');
+      teRenderEventGrids(); teRenderBigTooth(); teRenderCurrentChip(); teRenderHistory();
+      dcRenderChart(); dcRenderEvents();
+    };
+    // ── Confirm Modal مخصص (Promise + لوحة مفاتيح) ──
+    var _dcCfResolve = null, _dcCfLastFocus = null;
+    window.dcConfirm = function(opts) {
+      opts = opts || {};
+      return new Promise(function(resolve) {
+        var m = document.getElementById('dcConfirmModal');
+        if (!m) { resolve(window.confirm(opts.message || '')); return; }
+        _dcCfResolve = resolve;
+        _dcCfLastFocus = document.activeElement;
+        document.getElementById('dcConfirmTitle').textContent = opts.title || 'تأكيد الإجراء';
+        document.getElementById('dcConfirmMsg').textContent = opts.message || '';
+        var ok = document.getElementById('dcConfirmOk');
+        ok.textContent = opts.confirmLabel || 'حذف';
+        ok.className = 'dc-cf-btn ' + (opts.danger === false ? 'dc-cf-primary' : 'dc-cf-danger');
+        m.classList.add('show');
+        setTimeout(function(){ ok.focus(); }, 70);
+      });
+    };
+    window._dcCfClose = function(val) {
+      var m = document.getElementById('dcConfirmModal'); if (m) m.classList.remove('show');
+      if (_dcCfResolve) { _dcCfResolve(val); _dcCfResolve = null; }
+      if (_dcCfLastFocus && _dcCfLastFocus.focus) { try { _dcCfLastFocus.focus(); } catch (e) {} }
+    };
+    document.addEventListener('keydown', function(e) {
+      var m = document.getElementById('dcConfirmModal');
+      if (!m || !m.classList.contains('show')) return;
+      if (e.key === 'Escape') { e.preventDefault(); _dcCfClose(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); _dcCfClose(true); }
+    });
+    window.dcDeleteEvent = function(ts) {
+      var p = allPatients[dcCurrentPid]; if (!p) return;
+      var ev = (p.dentalEvents || []).find(function(e){ return e.ts === ts; });
+      if (!ev) return;
+      var def = dcEventDef(ev);
+      dcConfirm({ title: 'حذف حالة السن', message: 'سيتم حذف "' + def.label + '" من السن ' + ev.tooth + '، وإعادة حساب حالة السن تلقائياً. لا يمكن التراجع.', confirmLabel: 'حذف الحدث', danger: true }).then(function(ok) {
+        if (!ok) return;
+        p.dentalEvents = (p.dentalEvents || []).filter(function(e){ return e.ts !== ts; });
+        dcRecomputeTooth(p, ev.tooth);
+        dcPersist(p, 'تم حذف الحدث — أُعيد حساب حالة السن ' + ev.tooth);
+        dcRenderChart(); dcRenderEvents();
+        if (teCurrentTooth != null && !document.getElementById('toothEditModal').classList.contains('hidden')) {
+          teRenderBigTooth(); teRenderCurrentChip(); teRenderHistory();
+        }
+      });
+    };
+    // مسح كل أحداث السن الحالي — يعيده سليماً
+    window.dcClearToothEvents = function() {
+      var p = allPatients[dcCurrentPid]; if (!p || teCurrentTooth == null) return;
+      var evs = dcToothEvents(p, teCurrentTooth);
+      if (!evs.length) { showToast('لا توجد أحداث لهذا السن', 'info'); return; }
+      var tooth = teCurrentTooth;
+      dcConfirm({ title: 'مسح كل أحداث السن', message: 'سيتم مسح ' + evs.length + ' حدث من السن ' + tooth + '، وإعادته إلى الحالة السليمة. لا يمكن التراجع.', confirmLabel: 'مسح الكل', danger: true }).then(function(ok) {
+        if (!ok) return;
+        p.dentalEvents = (p.dentalEvents || []).filter(function(e){ return String(e.tooth) !== String(tooth); });
+        dcRecomputeTooth(p, tooth);
+        dcPersist(p, 'السن ' + tooth + ' عاد سليماً');
+        teRenderBigTooth(); teRenderCurrentChip(); teRenderHistory();
+        dcRenderChart(); dcRenderEvents();
+      });
+    };
+
+    // ===== أدوات عامة للنماذج =====
+    function _setVal(id, v){ var el = document.getElementById(id); if (el) el.value = v || ''; }
+    function _getVal(id){ var el = document.getElementById(id); return el ? el.value.trim() : ''; }
+
+    /* =====================================================================
+       شاشة إعداد العيادة لأول تسجيل دخول (Onboarding)
+       ---------------------------------------------------------------------
+       متى تظهر؟ عند الإقلاع بعد تحميل settings، إن لم تكن هناك علامة
+       settings.onboarded ولا settings.specialty (أي حساب جديد تماماً).
+       الحسابات القائمة — وفيها تخصّص أصلاً — تُعتبر مُعدّة فلا تظهر لها.
+
+       ماذا تحفظ؟ في وثيقة settings/doctor نفسها عبر saveSettingsToLocal:
+         title · specialty · address · mobile · landline · logo
+         chartTemplate {patient,visit} · onboarded:true · onboardedAt
+       لا قواعد أمان جديدة ولا ترحيل بيانات — نفس الوثيقة ونفس دالة الحفظ.
+
+       للمعاينة وقتما شئت من الـConsole:  resetOnboarding()
+       وزر «خصّص اضبارتك» يبقى في الإعدادات كما هو.
+       ===================================================================== */
+
+    /* ⚠️⚠️⚠️ وضع المعاينة المؤقّت — يجب إطفاؤه قبل التسليم ⚠️⚠️⚠️
+       الشاشة تظهر بعد دورة «تسجيل خروج ← دخول» فقط، ولا تظهر عند تحديث الصفحة:
+       docbookSignOut() تكتب علامة في localStorage، و maybeStartOnboarding()
+       تستهلكها مرّة واحدة عند الدخول التالي ثم تمحوها.
+       للإطفاء: بدّله إلى false — أو اطلب مني إزالة الوضع كلياً. */
+    var _OB_PREVIEW_AFTER_LOGOUT = true;
+    var _OB_PREVIEW_KEY = 'obPreviewAfterLogout';
+
+    var _obState = null;
+    var _obAR = ['١', '٢', '٣', '٤', '٥'];
+    var _obICONS = { text: 'أ', textarea: '¶', number: '#', date: '📅', select: '▾', checkbox: '☑' };
+
+    // تسميات الأنواع وترتيبها — مشتقّة من CF_TYPES نفسها فلا تفترقان أبداً
+    function _obTypeList() {
+      return (typeof CF_TYPES !== 'undefined' && CF_TYPES.length)
+        ? CF_TYPES
+        : [{ v: 'text', label: 'نص' }];
+    }
+    function _obTypeLabel(t) {
+      var l = _obTypeList().filter(function(x) { return x.v === t; })[0];
+      return l ? l.label : 'نص';
+    }
+
+    function _obEsc(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    /* ── اقتراح وحدة القياس تلقائياً حسب اسم الخانة ──
+       الوحدة تُضاف داخل الاسم بين قوسين — وهو العرف المتّبع في CHART_PRESETS
+       («الوزن الحالي (كغ)»). ميزته أنه يعمل فوراً في الاضبارة والطباعة وتطبيق
+       الممرّضة بلا أي تغيير في بنية البيانات. يغطّي التخصّصات السبعة كلها. */
+    var _OB_UNITS = [
+      // عامة / باطنية
+      { k: ['ضغط العين', 'الضغط داخل العين', 'التوتر العيني'], u: 'mmHg' },
+      { k: ['ضغط الدم', 'الضغط الشرياني', 'ضغط شرياني'], u: 'mmHg' },
+      { k: ['ضغط العين', 'التوتر داخل العين'],            u: 'mmHg' },
+      { k: ['السكر', 'سكر الدم', 'غلوكوز'],               u: 'ملغ/دل' },
+      { k: ['الحرارة', 'حرارة'],                          u: '°م' },
+      { k: ['النبض', 'نبض'],                              u: 'ن/د' },
+      { k: ['التنفس', 'تنفّس', 'تنفس'],                    u: 'ن/د' },
+      { k: ['الأكسجين', 'إشباع', 'اشباع', 'أكسجة'],        u: '٪' },
+      { k: ['الهيموغلوبين', 'الخضاب', 'خضاب'],             u: 'غ/دل' },
+      { k: ['الكرياتينين', 'كرياتينين'],                   u: 'ملغ/دل' },
+      { k: ['اليوريا', 'يوريا', 'البولة'],                 u: 'ملغ/دل' },
+      { k: ['الكوليسترول', 'كوليسترول', 'الشحوم', 'الدهون الثلاثية'], u: 'ملغ/دل' },
+      { k: ['كتلة الجسم', 'BMI'],                          u: 'كغ/م²' },
+      { k: ['الوزن', 'وزن'],                               u: 'كغ' },
+      { k: ['الطول', 'القامة'],                            u: 'سم' },
+      { k: ['محيط'],                                       u: 'سم' },
+      { k: ['الجرعة', 'جرعة'],                             u: 'ملغ' },
+      // قلبية
+      { k: ['الجزء المقذوف', 'الكسر القذفي', 'EF'],        u: '٪' },
+      // نسائية
+      { k: ['أسبوع الحمل', 'عمر الحمل'],                   u: 'أسبوع' },
+      { k: ['بطانة الرحم', 'سماكة البطانة'],               u: 'ملم' },
+      { k: ['حجم الكيس', 'قطر الكيس', 'المبيض'],           u: 'ملم' },
+      // أطفال
+      { k: ['محيط الرأس'],                                 u: 'سم' },
+      // جلدية
+      { k: ['قطر الآفة', 'حجم الآفة', 'مساحة الآفة'],      u: 'ملم' },
+      // عظمية
+      { k: ['مدى الحركة', 'الزاوية', 'زاوية'],             u: 'درجة' },
+      // أسنان
+      { k: ['عمق الجيب', 'الجيب اللثوي'],                  u: 'ملم' }
+    ];
+
+    // الوحدة تُقترح للنصّ والرقم فقط — لا معنى لها في التاريخ أو نعم/لا أو القائمة
+    function _obUnitAllowed(type) { return type === 'text' || type === 'number'; }
+
+    function _obSuggestUnit(label) {
+      var s = String(label == null ? '' : label).trim();
+      if (!s) return '';
+      if (/\([^)]*\)\s*$/.test(s)) return '';   // فيه قوسان أصلاً (وحدة أو إيضاح) ⇒ لا نقترح
+      for (var i = 0; i < _OB_UNITS.length; i++) {
+        for (var j = 0; j < _OB_UNITS[i].k.length; j++) {
+          if (s.indexOf(_OB_UNITS[i].k[j]) !== -1) return _OB_UNITS[i].u;
+        }
+      }
+      return '';
+    }
+
+    // هل هذا حساب لم يُعدّ بعد؟
+    function _obNeedsSetup() {
+      var s = (typeof settings !== 'undefined' && settings) || {};
+      return !s.onboarded && !(s.specialty || '').trim();
+    }
+
+    // يُستدعى بعد تحميل الإعدادات عند الإقلاع
+    function maybeStartOnboarding() {
+      // ⚠️ مؤقّت: عرض بعد تسجيل الخروج فقط — يُحذف مع _OB_PREVIEW_AFTER_LOGOUT
+      if (_OB_PREVIEW_AFTER_LOGOUT) {
+        var _obFlagged = false;
+        try { _obFlagged = localStorage.getItem(_OB_PREVIEW_KEY) === '1'; } catch (e) {}
+        if (_obFlagged) {
+          // تُستهلك مرّة واحدة: تحديث الصفحة بعدها لا يعيد الشاشة
+          try { localStorage.removeItem(_OB_PREVIEW_KEY); } catch (e) {}
+          console.warn('[onboarding] معاينة بعد تسجيل الخروج — لن تتكرر عند تحديث الصفحة. أطفئ _OB_PREVIEW_AFTER_LOGOUT قبل التسليم.');
+          openOnboarding();
+          return;
+        }
+      }
+      if (!_obNeedsSetup()) return;
+      openOnboarding();
+    }
+
+    window.resetOnboarding = function() {
+      openOnboarding();
+      console.log('[onboarding] فُتحت شاشة الإعداد للمعاينة — الإنهاء يحفظ الإعدادات من جديد.');
+    };
+
+    function openOnboarding() {
+      var s = (typeof settings !== 'undefined' && settings) || {};
+      var t = (s.chartTemplate && typeof s.chartTemplate === 'object') ? s.chartTemplate : {};
+      _obState = {
+        step: 0,
+        title: (s.title && s.title !== 'لوحة الطبيب') ? s.title : '',
+        specialty: s.specialty || '',
+        address: s.address || '',
+        mobile: s.mobile || '',
+        landline: s.landline || '',
+        logo: s.logo || null,
+        surgicalArchive: !!s.surgicalArchive,
+        orthoArchive: !!s.orthoArchive,
+        preset: '',
+        presetTouched: false,   // هل بتّ الطبيب في مسألة القالب بنفسه؟
+        fields: {
+          patient: Array.isArray(t.patient) ? t.patient.map(_obCloneField) : [],
+          visit: Array.isArray(t.visit) ? t.visit.map(_obCloneField) : []
+        }
+      };
+      var ov = document.getElementById('onboardOverlay');
+      if (!ov) { console.error('[onboarding] عنصر #onboardOverlay غير موجود في app.html'); return; }
+      ov.classList.add('show');
+      document.body.style.overflow = 'hidden';
+      _obRender();
+    }
+
+    function _obCloneField(f) {
+      // role يُنسَخ كما هو — إسقاطه هنا كان يُفقد الأدوار عند التحميل وتطبيق القوالب
+      return { id: f.id, label: f.label || '', type: f.type || 'text', options: (f.options || []).slice(), role: f.role || '' };
+    }
+
+    function closeOnboarding() {
+      var ov = document.getElementById('onboardOverlay');
+      if (ov) ov.classList.remove('show');
+      document.body.style.overflow = '';
+      document.documentElement.classList.remove('ob-pending');   // كشف التطبيق بعد الإعداد
+    }
+
+    /* تطبيق القالب = **دمج** لا استبدال.
+       كان يستبدل st.fields كاملةً، فمن أضاف خاناته بيده ثم انتبه للقالب ووضع
+       علامة الصح فقد كل ما كتبه بلا إنذار. الآن: خانات الطبيب تبقى، وتُضاف
+       خانات القالب غير المكرّرة فقط، وتُوسَم `fromPreset` كي يُمكن نزعها وحدها
+       عند إلغاء الصح. */
+    function _obApplyPreset(name) {
+      var p = (typeof CHART_PRESETS !== 'undefined' && CHART_PRESETS[name]) || { patient: [], visit: [] };
+      _obState.preset = name;
+      ['patient', 'visit'].forEach(function (scope) {
+        var cur = _obState.fields[scope] || [];
+        var seen = {};
+        cur.forEach(function (f) { seen[_obNormLabel(f.label)] = true; });
+        (p[scope] || []).forEach(function (pf) {
+          var key = _obNormLabel(pf.label);
+          if (seen[key]) return;                 // الطبيب كتبها بنفسه — لا نكرّرها
+          seen[key] = true;
+          var clone = _obCloneField(pf);
+          clone.fromPreset = true;
+          cur.push(clone);
+        });
+        _obState.fields[scope] = cur;
+      });
+    }
+
+    /* نزع خانات القالب وحدها — ما كتبه الطبيب أو عدّله يبقى */
+    function _obRemovePreset() {
+      ['patient', 'visit'].forEach(function (scope) {
+        _obState.fields[scope] = (_obState.fields[scope] || []).filter(function (f) { return !f.fromPreset; });
+      });
+      _obState.preset = '';
+    }
+
+    // مقارنة أسماء الخانات بتجاهل المسافات والتشكيل الطفيف
+    function _obNormLabel(s) {
+      return String(s == null ? '' : s).trim().replace(/\s+/g, ' ').toLowerCase();
+    }
+
+    // إلغاء تمييز القالب بعد تعديل يدوي — بلا إعادة رسم حتى لا يُفقد التركيز
+    function _obUnmarkPreset() {
+      if (!_obState.preset) return;
+      _obState.preset = '';
+      Array.prototype.forEach.call(document.querySelectorAll('#onboardOverlay .ob-chip.on'), function(b) {
+        b.classList.remove('on');
+      });
+    }
+
+    /* أرقام خطوات المعالج في مكان واحد — كانت مبعثرة (4 و2 و3) في خمسة مواضع،
+       فأي تقسيم للخطوات كان يتطلّب تتبّعها يدوياً.
+       ٠ معلومات الطبيب · ١ بيانات العيادة · ٢ خانات المريض · ٣ خانات الزيارة · ٤ المراجعة */
+    var OB_STEPS = 5;          // العدد الكلي
+    var OB_LAST_EDIT = 3;      // آخر خطوة تحرير — بعدها يُنفَّذ الحفظ
+    var OB_DONE = 4;           // شاشة المراجعة (بلا شريط أزرار)
+
+    function _obSyncChrome() {
+      Array.prototype.forEach.call(document.querySelectorAll('#onboardOverlay .ob-step'), function(li) {
+        var i = +li.getAttribute('data-step');
+        li.classList.toggle('current', i === _obState.step);
+        li.classList.toggle('done', i < _obState.step);
+      });
+      var prog = document.getElementById('obProg');
+      if (prog) prog.style.width = ((_obState.step + 1) / OB_STEPS * 100) + '%';
+
+      var back = document.getElementById('obBack'), next = document.getElementById('obNext'),
+          foot = document.getElementById('obFoot');
+      if (back) back.style.visibility = _obState.step === 0 ? 'hidden' : 'visible';
+      if (next) {
+        next.innerHTML = (_obState.step === OB_LAST_EDIT ? 'إنهاء الإعداد' : 'التالي') + ' <span aria-hidden="true">←</span>';
+        // لا يمكن تجاوز الخطوة الأولى بلا اسم وتخصّص
+        next.disabled = (_obState.step === 0 && !(_obState.title.trim() && _obState.specialty));
+      }
+      if (foot) foot.style.display = _obState.step === OB_DONE ? 'none' : 'flex';
+    }
+
+    function _obHead(n, title, lede) {
+      return '<p class="ob-stepno">الخطوة ' + _obAR[n] + ' من ' + _obAR[OB_STEPS - 1] + '</p>' +
+        '<h2 class="ob-h' + (lede ? ' tight' : '') + '">' + title + '</h2>' +
+        (lede ? '<p class="ob-lede">' + lede + '</p>' : '');
+    }
+    function _obTip(t, b) {
+      return '<div class="ob-tip"><span class="i">i</span><p><b>' + t + '</b>' + b + '</p></div>';
+    }
+
+    /* ── معاينة شكل الاضبارة قبل الإنهاء ──
+       لا ترسم شكلاً مشابهاً، بل تستعمل **نفس** buildCustomFieldInputs التي تبني
+       الحقول في الاضبارة الحقيقية (نموذج معلومات المريض ومحرّر الزيارة)، مع نسخة
+       طبق الأصل من ترميز الحقول المدمجة في patientInfoModal / ve-card.
+       فما يراه الطبيب هنا هو حرفياً ما سيظهر له بعد الحفظ. لا تُحفظ أي بيانات. */
+    /* ── معاينة الاضبارة — شاشة كاملة بنفس بنية الاضبارة الحقيقية ──
+       تُبنى بنفس أصناف الاضبارة (pf-hero / pf-tiles / pf-tile / chart-layout /
+       pf-tl / chart-visit) — لا نموذج مبسّط — فما يراه الطبيب هنا هو حرفياً شكل
+       الاضبارة من الداخل، بقيم نموذجية وخانات تخصّصه المسودّة. لا يُحفظ شيء. */
+    function _obOpenChartPreview() {
+      var st = _obState, box = document.getElementById('obPrevBody');
+      if (!box) return;
+      var pf = st.fields.patient.filter(function(f) { return (f.label || '').trim(); });
+      var vf = st.fields.visit.filter(function(f) { return (f.label || '').trim(); });
+
+      function sample(f) {
+        var t = f.type || 'text';
+        if (t === 'number') return '١٢٠';
+        if (t === 'date') return formatDateAr('2024-03-15');
+        if (t === 'checkbox') return 'نعم';
+        if (t === 'select') return (f.options && f.options[0]) || 'خيار';
+        if (t === 'textarea') return 'مثال توضيحي لمحتوى هذا الحقل';
+        return 'قيمة نموذجية';
+      }
+      var _isAll = function(f) { return typeof _cfIsAllergy === 'function' && _cfIsAllergy(f); };
+
+      // تنبيه الحساسية (سطر بلا حاوية) من خانات المريض المعرّفة كحساسية
+      var allergyLine = pf.filter(_isAll).map(function(f) {
+        return '<div class="pf-alertline"><span class="pf-alerttag">تنبيه</span>'
+          + '<span class="pf-alerttext"><b>' + escapeHtml(f.label) + ':</b> ' + escapeHtml(sample(f)) + '</span></div>';
+      }).join('');
+      // خانات المريض المخصّصة (غير الحساسية) كبلاطات — نفس _pfTile الحقيقي
+      var custTiles = pf.filter(function(f) { return !_isAll(f); }).map(function(f) {
+        return _pfTile(f.label, escapeHtml(sample(f)), { icon: _cfTypeIcon(f.type) });
+      }).join('');
+
+      var infoTiles = allergyLine
+        + _pfTile('رقم الهاتف', '<span dir="ltr">0955 123 456</span>', { icon: 'fa-phone' })
+        + _pfTile('تاريخ الميلاد', formatDateAr('1990-05-12'), { icon: 'fa-calendar-day' })
+        + _pfTile('العمر', '35 سنة', { icon: 'fa-hourglass-half' })
+        + _pfTile('زمرة الدم', 'O+', { icon: 'fa-droplet', iconColor: '#dc2626', valColor: '#dc2626' })
+        + _pfTile('العنوان', 'دمشق — المزّة', { icon: 'fa-location-dot' })
+        + _pfTile('إجمالي الزيارات', '٣', { icon: 'fa-clock-rotate-left' })
+        + custTiles
+        + _pfTile('أمراض مزمنة', 'سكري · ضغط', { full: true, icon: 'fa-heart-pulse', iconColor: '#d97706', valColor: '#d97706' });
+
+      // شبكة حقول الزيارة المخصّصة — نفس شكل renderVisitCustomHtml
+      function vCustom() {
+        var items = vf.map(function(f) {
+          return '<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:6px 9px;min-width:0;">'
+            + '<div style="font-size:.66rem;color:var(--text-muted);font-weight:600;margin-bottom:2px;">' + escapeHtml(f.label) + '</div>'
+            + '<div style="font-size:.82rem;font-weight:700;color:var(--text-primary);word-break:break-word;">' + escapeHtml(sample(f)) + '</div></div>';
+        });
+        return items.length ? '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-top:12px;">' + items.join('') + '</div>' : '';
+      }
+      function visitCard(headline, dateStr, expanded) {
+        var body = expanded
+          ? (_visitSection('الشكوى', 'fa-comment-medical', 'ألم وتورّم منذ ثلاثة أيام')
+             + vCustom()
+             + _visitSection('التشخيص', 'fa-notes-medical', headline)
+             + _visitSection('الوصفة الطبية', 'fa-prescription', 'دواء · جرعة · مدّة — مثال'))
+          : '';
+        return '<div class="chart-visit" style="border:1.5px solid var(--border);border-right:4px solid var(--primary);border-radius:12px;overflow:hidden;background:var(--surface);">'
+          + '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;">'
+            + '<div style="min-width:0;"><div style="font-weight:800;font-size:.88rem;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(headline) + '</div>'
+            + '<div style="font-size:.74rem;color:var(--text-muted);margin-top:2px;">' + dateStr + ' · كشف</div></div>'
+            + '<i class="fas fa-chevron-' + (expanded ? 'up' : 'down') + '" style="color:var(--text-muted);flex-shrink:0;"></i></div>'
+          + (expanded ? '<div style="padding:0 13px 13px;border-top:1px dashed var(--border);">' + body + '</div>' : '')
+          + '</div>';
+      }
+
+      var showSurg = !!st.surgicalArchive;
+      var showOrtho = !!st.orthoArchive;
+
+      // صفحة ١: معلومات المريض الثابتة (الهيدر pf-hero مشترك خارج الصفحات)
+      var infoPage =
+        '<div class="obp-wrap"><div class="glass-card" style="padding:16px;">'
+          + '<div class="pf-tiles">' + infoTiles + '</div></div>'
+          + '<p class="obp-hint">هذه الخانات <b>ثابتة</b> — تُكتب مرّة واحدة وتبقى في ملف المريض مهما تكرّرت زياراته.</p></div>';
+
+      // صفحة ٢: الزيارة = محرّر الزيارة الحقيقي (SOAP بنفس ve-card) + حقول التخصّص
+      var _veSpan = ' <span style="font-weight:500;font-size:.74rem;color:var(--text-muted);">';
+      var visitPage =
+        '<div class="obp-wrap"><div class="ve-soap">'
+          + '<div class="ve-step"><div class="ve-card"><label class="ve-label">الشكوى' + _veSpan + '— ماذا يقول المريض؟</span></label>'
+            + '<textarea readonly rows="1">ألم وتورّم منذ ثلاثة أيام</textarea></div></div>'
+          + (vf.length
+              ? '<div class="ve-step"><div class="ve-card"><label class="ve-label">القياسات' + _veSpan + '— حقول تخصّصك</span></label><div id="obPrevVisitCF"></div></div></div>'
+              : '')
+          + '<div class="ve-step"><div class="ve-card"><label class="ve-label">الفحص السريري</label>'
+            + '<textarea readonly rows="1">إصغاء وجسّ — علامات سريرية نموذجية</textarea></div></div>'
+          + '<div class="ve-step"><div class="ve-card"><label class="ve-label">التشخيص</label>'
+            + '<textarea readonly rows="1">تشخيص نموذجي</textarea></div></div>'
+          + '<div class="ve-step"><div class="ve-card"><label class="ve-label">الخطة — الوصفة' + _veSpan + '— ما يخرج به المريض</span></label>'
+            + '<textarea id="obPrevRx" readonly rows="3">الدواء · الجرعة · المدّة — مثال</textarea></div></div>'
+          + '</div>'
+          + '<p class="obp-hint">تتكرّر مع <b>كل زيارة</b> — لكلٍّ قيمها وتاريخها، فتقارن تطوّر الحالة بين موعد وآخر.</p></div>';
+
+      // صفحة ٣: أرشيف العمليات الجراحية (إن فُعّلت الميزة) — بنفس أصناف الشاشة الحقيقية
+      var surgeryPage = !showSurg ? '' :
+        '<div class="obp-wrap">'
+          + '<div class="dc-card"><h4 class="dc-card-title"><i class="fas fa-calendar-check"></i> عمليات مجدولة</h4>'
+            + '<div class="sg-sched"><div class="sg-row"><div style="min-width:0;"><div class="sg-name">استئصال الزائدة الدودية</div>'
+              + '<div class="sg-date"><i class="fas fa-calendar-day"></i>' + formatDateAr('2026-08-10') + '</div>'
+              + '<div class="sg-fromvisit"><i class="fas fa-link"></i> من زيارة ' + formatDateAr(todayStr) + '</div></div>'
+              + '<div class="sg-right"><span class="sg-pill blue">مجدولة</span></div></div></div></div>'
+          + '<div class="dc-card" style="margin-top:14px;"><h4 class="dc-card-title"><i class="fas fa-clock-rotate-left"></i> سوابق جراحية</h4>'
+            + '<div class="pf-tl"><div class="sg-done"><div class="sg-row"><div style="min-width:0;"><div class="sg-name">استئصال المرارة بالمنظار</div>'
+              + '<div class="sg-date"><i class="fas fa-calendar-day"></i>' + formatDateAr('2022-04-18') + '</div></div></div>'
+              + '<div class="sg-note comp"><b>المضاعفات:</b> لا مضاعفات</div></div></div></div>'
+          + '<p class="obp-hint">شاشة مستقلّة: <b>جدولة العمليات</b> وتوثيق سوابقها ومضاعفاتها — تبدأ من محرّر الزيارة.</p></div>';
+
+      // صفحة ٤: تقويم الأسنان (إن فُعّلت الميزة)
+      var orthoAdjTl = '<div class="or-adj-tl">'
+        + '<div class="or-adj"><div class="or-adj-row"><div style="min-width:0;"><div class="or-adj-date">' + formatDateAr('2026-06-01') + '</div><div class="or-adj-note">شدّ الأسلاك · تبديل المطّاط</div></div></div></div>'
+        + '<div class="or-adj"><div class="or-adj-row"><div style="min-width:0;"><div class="or-adj-date">' + formatDateAr('2026-05-01') + '</div><div class="or-adj-note">تركيب الحاصرات</div></div></div></div>'
+        + '</div>';
+      var orthoPage = !showOrtho ? '' :
+        '<div class="obp-wrap">'
+          + '<div class="dc-card"><h4 class="dc-card-title"><i class="fas fa-teeth-open"></i> تقويم نشط</h4>'
+            + '<div class="sg-sched"><div class="sg-row"><div style="min-width:0;"><div class="sg-name">تقويم ثابت</div>'
+              + '<div class="or-meta"><span class="or-chip"><b>البدء:</b> ' + formatDateAr('2026-05-01') + '</span>'
+              + '<span class="or-chip"><b>المدّة:</b> 18 شهر</span><span class="or-chip"><b>جلسات الشدّ:</b> 2</span></div>'
+              + '<div class="sg-fromvisit"><i class="fas fa-link"></i> من زيارة ' + formatDateAr(todayStr) + '</div></div>'
+              + '<div class="sg-right"><span class="sg-pill blue">نشط</span></div></div>'
+              + '<div class="or-adj-head"><span class="t">مواعيد الشدّ</span></div>' + orthoAdjTl + '</div></div>'
+          + '<p class="obp-hint">شاشة مستقلّة: تُبدأ من محرّر الزيارة، وتُتابَع مواعيد الشدّ حتى الإنهاء.</p></div>';
+
+      // تبويبات نصّية فقط (بلا هيدر)
+      // كل الأقسام في صفحة واحدة قابلة للتمرير — بلا تبويبات، بعنوان لكل قسم
+      function _obSectH(t) { return '<div class="obp-sect-h">' + t + '</div>'; }
+      box.innerHTML =
+        _obSectH('معلومات المريض') + infoPage
+        + _obSectH('الزيارة') + visitPage
+        + (showSurg ? _obSectH('العمليات الجراحية') + surgeryPage : '')
+        + (showOrtho ? _obSectH('تقويم الأسنان') + orthoPage : '');
+
+      // حقول التخصّص في تبويب الزيارة — تُبنى بنفس دالّة محرّر الزيارة الحقيقي
+      var _vcf = document.getElementById('obPrevVisitCF');
+      if (_vcf && typeof buildCustomFieldInputs === 'function') {
+        buildCustomFieldInputs(_vcf, vf, {}, { variant: 'editor' });
+        Array.prototype.forEach.call(_vcf.querySelectorAll('input,select,textarea'), function(el) {
+          if (el.tagName === 'SELECT' || el.type === 'checkbox') el.disabled = true; else el.readOnly = true;
+          el.setAttribute('tabindex', '-1');
+        });
+      }
+      // نموّ حقول النصّ لتظهر بمحتواها (كالمحرّر الحقيقي)
+      if (typeof veAutoGrow === 'function') {
+        Array.prototype.forEach.call(box.querySelectorAll('.ve-card textarea'), veAutoGrow);
+      }
+
+      var pane = document.getElementById('obPreview');
+      if (pane) pane.classList.add('show');
+    }
+    window.obPrevShowTab = function(id) {
+      ['info', 'visit', 'surgery', 'ortho'].forEach(function(t) {
+        var el = document.getElementById('obpPage' + t);
+        if (el) el.style.display = (t === id) ? '' : 'none';
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('#obPreview .obp-tab'), function(b) {
+        b.classList.toggle('active', b.getAttribute('data-tab') === id);
+      });
+    };
+
+    function _obCloseChartPreview() {
+      var pane = document.getElementById('obPreview');
+      if (pane) pane.classList.remove('show');
+    }
+
+    function _obRender(focusScope, focusIdx) {
+      var body = document.getElementById('obBody');
+      if (!body) return;
+      var st = _obState;
+
+      if (st.step === 0) {
+        var names = (typeof CHART_PRESETS !== 'undefined') ? Object.keys(CHART_PRESETS) : [];
+        var opts = names.map(function(s) {
+          return '<option' + (s === st.specialty ? ' selected' : '') + '>' + _obEsc(s) + '</option>';
+        }).join('');
+        // قسم الميزات — قوائم منسدلة (نعم/لا) بنفس هيئة حقل التخصّص، بلا أيقونات.
+        // تظهر بعد اختيار التخصّص؛ والتقويم لخيار الأسنان فقط.
+        var _obDental = /أسنان|اسنان|dental/i.test(st.specialty || '');
+        function _obYesNo(id, on) {
+          return '<select id="' + id + '"><option value="0"' + (on ? '' : ' selected') + '>لا</option>'
+            + '<option value="1"' + (on ? ' selected' : '') + '>نعم</option></select>';
+        }
+        var featHtml = st.specialty ? (
+          '<div class="ob-f"><label for="obFeatSurgSel">أرشيف العمليات الجراحية</label>' +
+            _obYesNo('obFeatSurgSel', st.surgicalArchive) +
+            '<span class="help">شاشة لجدولة العمليات وتوثيق سوابقها.</span></div>' +
+          (_obDental
+            ? '<div class="ob-f"><label for="obFeatOrthoSel">أرشيف تقويم الأسنان</label>' +
+                _obYesNo('obFeatOrthoSel', st.orthoArchive) +
+                '<span class="help">شاشة لدورات التقويم ومواعيد الشدّ.</span></div>'
+            : '')
+        ) : '';
+
+        body.innerHTML = '<div class="ob-pane ob-body">' +
+          _obHead(0, 'معلومات الطبيب') +
+          '<div class="ob-grid">' +
+            '<div class="ob-f"><label for="obName">الاسم الكامل</label>' +
+              '<input id="obName" type="text" placeholder="مثال: د. أحمد الخالدي" value="' + _obEsc(st.title) + '">' +
+              '<span class="help">كما تريده أن يظهر للمرضى وفي ترويسة الوصفات.</span></div>' +
+            '<div class="ob-f"><label for="obSpec">التخصّص</label>' +
+              '<select id="obSpec"><option value="" disabled' + (st.specialty ? '' : ' selected') + '>اختر تخصّصك</option>' + opts + '</select>' +
+              '<span class="help accent">عليه تُبنى خانات الاضبارة الجاهزة.</span></div>' +
+            featHtml +
+          '</div>' +
+          _obTip('تنويه مهم: ', 'التخصّص <b style="display:inline">يُختار مرّة واحدة</b> — عليه تُبنى خانات الاضبارة وتقارير العيادة. أمّا بقية الإعدادات (الاسم، العنوان، الأرقام، الصورة، الخانات، والميزات) فتعدّلها متى شئت من الإعدادات.') +
+        '</div>';
+
+        document.getElementById('obName').oninput = function() { st.title = this.value; _obSyncChrome(); };
+        document.getElementById('obSpec').onchange = function() {
+          st.specialty = this.value;
+          _obApplyPreset(this.value);
+          if (!/أسنان|اسنان|dental/i.test(this.value)) st.orthoArchive = false;   // التقويم للأسنان فقط
+          _obSyncChrome();
+          _obRender();   // لإظهار قسم الميزات المناسب للتخصّص
+        };
+        var _fs = document.getElementById('obFeatSurgSel'); if (_fs) _fs.onchange = function() { st.surgicalArchive = this.value === '1'; };
+        var _fo = document.getElementById('obFeatOrthoSel'); if (_fo) _fo.onchange = function() { st.orthoArchive = this.value === '1'; };
+      }
+
+      else if (st.step === 1) {
+        body.innerHTML = '<div class="ob-pane ob-body">' +
+          _obHead(1, 'بيانات العيادة') +
+          '<div class="ob-grid">' +
+            '<div class="ob-f wide"><label for="obAddr">العنوان</label>' +
+              '<input id="obAddr" type="text" placeholder="المدينة، المنطقة، أقرب نقطة دالّة" value="' + _obEsc(st.address) + '">' +
+              '<span class="help">يظهر في صفحة الحجز وفي رسائل التذكير.</span></div>' +
+            '<div class="ob-f"><label for="obMob">رقم الجوال</label>' +
+              '<input id="obMob" type="tel" dir="ltr" placeholder="07XX XXX XXXX" value="' + _obEsc(st.mobile) + '">' +
+              '<span class="help accent">يُستخدم لإشعارات واتساب.</span></div>' +
+            '<div class="ob-f"><label for="obTel">الهاتف الأرضي <span class="opt">(اختياري)</span></label>' +
+              '<input id="obTel" type="tel" dir="ltr" placeholder="0XX XXX XXXX" value="' + _obEsc(st.landline) + '">' +
+              '<span class="help">للمرضى الذين يفضّلون الاتصال الأرضي.</span></div>' +
+            '<div class="ob-f wide"><label>صورة الطبيب <span class="opt">(اختياري)</span></label>' +
+              '<div class="ob-photo">' +
+                '<div class="ob-ph' + (st.logo ? ' filled' : '') + '" id="obPhotoBox">' +
+                  (st.logo ? '<img src="' + _obEsc(st.logo) + '" alt="صورة الطبيب">' : '<i class="fas fa-user-md"></i>') +
+                '</div>' +
+                '<div><button class="ob-photo-btn" type="button" id="obPhotoBtn">' +
+                  (st.logo ? 'تغيير الصورة' : 'اختيار صورة') + '</button>' +
+                  '<span class="help">تظهر في ترويسة الطباعة وفي أعلى لوحتك. PNG أو JPG.</span></div>' +
+              '</div>' +
+              '<input type="file" id="obPhotoInput" accept="image/*" style="display:none">' +
+            '</div>' +
+          '</div>' +
+          _obTip('نصيحة: ', 'أدخل العنوان كما يعرفه المرضى لا كما هو رسمياً — أقرب نقطة دالّة تختصر عليهم الطريق أكثر من اسم الشارع.') +
+        '</div>';
+
+        document.getElementById('obAddr').oninput = function() { st.address = this.value; };
+        document.getElementById('obMob').oninput  = function() { st.mobile  = this.value; };
+        document.getElementById('obTel').oninput  = function() { st.landline = this.value; };
+
+        var fileInput = document.getElementById('obPhotoInput');
+        document.getElementById('obPhotoBtn').onclick = function() { fileInput.click(); };
+        fileInput.onchange = function(e) {
+          var file = e.target.files[0];
+          if (!file) return;
+          if (!file.type.startsWith('image/')) { showToast('الرجاء اختيار ملف صورة', 'error'); return; }
+          if (file.size > 5 * 1024 * 1024) { showToast('حجم الصورة يجب أن يكون أقل من 5 ميغابايت', 'error'); return; }
+          var btn = document.getElementById('obPhotoBtn');
+          btn.disabled = true; btn.textContent = 'جارٍ الرفع…';
+          window._fb.uploadLogo('doctor', file).then(function(url) {
+            st.logo = url;
+            var box = document.getElementById('obPhotoBox');
+            box.innerHTML = '<img src="' + _obEsc(url) + '" alt="صورة الطبيب">';
+            box.classList.add('filled');
+            btn.disabled = false; btn.textContent = 'تغيير الصورة';
+            showToast('تم رفع الصورة بنجاح', 'success');
+          }).catch(function(err) {
+            btn.disabled = false; btn.textContent = 'اختيار صورة';
+            showToast('فشل رفع الصورة', 'error');
+            console.error('[onboarding] فشل رفع الصورة', err);
+          });
+        };
+      }
+
+      else if (st.step === 2 || st.step === 3) {
+        // الخانات المدمجة (ثابتة دائماً في الاضبارة) — تُعرض كمرجع غير قابل للتعديل
+        // فتُطابق قائمةُ الإعداد الاضبارةَ ومعلومات المريض تماماً بلا نقص.
+        var _OB_BUILTIN = {
+          patient: ['الاسم', 'رقم الهاتف', 'تاريخ الميلاد', 'زمرة الدم', 'العنوان', 'الأمراض المزمنة'],
+          visit: ['الشكوى', 'الفحص السريري', 'التشخيص', 'الوصفة الطبية']
+        };
+        /* القالب يُطبَّق تلقائياً أوّل دخول لهذه الخطوة بدل انتظار أن ينتبه الطبيب
+           لمربّع صغير: التخصّص مُختار أصلاً في الخطوة الأولى، فعرض خاناته
+           المقترحة جاهزةً هو التوقّع الطبيعي — ويبقى بإمكانه إلغاء الصح.
+           الشرطان يمنعان الإزعاج: لم يبتّ بالأمر بعد، ولا خانات لديه أصلاً. */
+        if (!st.presetTouched && !st.preset && st.specialty &&
+            !st.fields.patient.length && !st.fields.visit.length) {
+          _obApplyPreset(st.specialty);
+        }
+
+        function grp(scope, title, note) {
+          var builtin = (_OB_BUILTIN[scope] || []).map(function(lbl) {
+            return '<div class="ob-cfrow ob-builtin"><span class="ob-builtin-lbl">' + _obEsc(lbl) + '</span><span class="ob-cftag">مدمجة</span></div>';
+          }).join('');
+          var arr = st.fields[scope];
+          var rows = arr.length
+            ? arr.map(function(f, i) {
+                var o = _obTypeList().map(function(t) {
+                  return '<option value="' + t.v + '"' + (t.v === f.type ? ' selected' : '') + '>' + t.label + '</option>';
+                }).join('');
+                return '<div class="ob-cfrow" data-s="' + scope + '" data-i="' + i + '">' +
+                  '<input class="ob-cfin" type="text" value="' + _obEsc(f.label) + '" placeholder="اسم الخانة" aria-label="اسم الخانة">' +
+                  '<button class="ob-cfdel" type="button" aria-label="حذف خانة">✕</button>' +
+                  '<select class="ob-cfsel" aria-label="نوع الخانة">' + o + '</select>' +
+                  // حقل الخيارات — بنفس صيغة المخصِّص في الإعدادات (يُفصل بفاصلة)
+                  '<input class="ob-cfopt" type="text" aria-label="خيارات القائمة" ' +
+                    'placeholder="الخيارات (افصل بفاصلة) — مثال: خفيف، متوسط، شديد" ' +
+                    'value="' + _obEsc((f.options || []).join('، ')) + '"' +
+                    (f.type === 'select' ? '' : ' style="display:none"') + '>' +
+                  '<div class="ob-cfwarn"' +
+                    ((f.type === 'select' && !(f.options || []).length) ? '' : ' style="display:none"') +
+                    '>اكتب خيارات القائمة، وإلا ظهرت فارغة في الاضبارة.</div>' +
+                  // اقتراح وحدة القياس — يُضاف داخل الاسم بضغطة
+                  (function() {
+                    var sug = _obUnitAllowed(f.type) ? _obSuggestUnit(f.label) : '';
+                    return '<div class="ob-cfunit"' + (sug ? '' : ' style="display:none"') + '>' +
+                      '<span>الوحدة المعتادة:</span>' +
+                      '<button type="button" class="ob-unitbtn" data-u="' + _obEsc(sug) + '">' +
+                        'أضف (' + _obEsc(sug) + ')</button></div>';
+                  })() +
+                  // الدور السريري — نفس سجلّ CF_ROLES المستعمل في مخصِّص الإعدادات
+                  (function() {
+                    var rs = _cfRolesFor(f.type || 'text', scope);
+                    if (!rs.length) return '<select class="ob-cfrole" style="display:none"></select>';
+                    return '<select class="ob-cfrole" aria-label="الدور السريري">' +
+                      '<option value="">— بلا دور سريري —</option>' +
+                      rs.map(function(r) {
+                        return '<option value="' + r.v + '"' + (f.role === r.v ? ' selected' : '') + '>' +
+                          _obEsc(r.label) + '</option>';
+                      }).join('') + '</select>';
+                  })() +
+                '</div>';
+              }).join('')
+            : '<div class="ob-cfempty">لا توجد خانات هنا بعد.</div>';
+          /* الخانات المدمجة مطويّة: عشر بطاقات لا يملك الطبيب تغييرها كانت تشغل
+             نصف الشاشة وتبدو كعمل مطلوب منه. صارت سطراً واحداً يُفتح عند الحاجة. */
+          var nB = (_OB_BUILTIN[scope] || []).length;
+          return '<div class="ob-cfsec">' +
+            '<p class="ob-cfnote">' + note + '</p>' +
+            '<details class="ob-bi"><summary>' + nB + ' خانات مدمجة تظهر دائماً — لا يمكن حذفها</summary>' +
+              '<div class="ob-cflist ob-bi-list">' + builtin + '</div></details>' +
+            '<p class="ob-cfhead">خانات تخصّصك' +
+              (arr.length ? ' <span style="font-weight:400;opacity:.6;">(' + arr.length + ')</span>' : '') + '</p>' +
+            '<div class="ob-cflist">' + rows +
+              '<button class="ob-cfadd" type="button" data-add="' + scope + '">＋ إضافة خانة</button>' +
+            '</div></div>';
+        }
+
+        /* خطوة واحدة لكل نوع خانات (٢ = المريض · ٣ = الزيارة).
+           كل شاشة تشرح نوعها فقط، فسقط العمود الجانبي بفقرتيه الطويلتين. */
+        var isPat = (st.step === 2);
+        var SC = isPat
+          ? { scope: 'patient', title: 'خانات المريض',
+              lede: 'معلومات ثابتة تكتبها مرّة واحدة وتبقى في ملف المريض مهما تكرّرت زياراته.',
+              note: 'مثل: السوابق الجراحية · الحساسية من دواء · التاريخ العائلي.' }
+          : { scope: 'visit', title: 'خانات الزيارة',
+              lede: 'معلومات تتغيّر، تُملأ في كل زيارة ويُحفظ لكلٍّ تاريخها فتبني سجلّاً زمنياً.',
+              note: 'مثل: الوزن اليوم · ضغط الدم · نتيجة فحص.' };
+
+        body.innerHTML = '<div class="ob-pane ob-body">' +
+          _obHead(st.step, SC.title, SC.lede) +
+          // القالب الجاهز — يظهر في الخطوتين لأنّه يملأ النوعين معاً
+          '<div class="ob-f"><label>القالب الجاهز</label>' +
+            '<label class="ob-tplchk"><input type="checkbox" id="obUsePreset"' + (st.preset && st.preset === st.specialty ? ' checked' : '') + '>' +
+              '<span>استعمل خانات تخصّص «' + (_obEsc(st.specialty) || 'تخصّصك') + '» — قابلة للتعديل والحذف</span></label></div>' +
+          grp(SC.scope, SC.title, SC.note) +
+          '<div class="ob-prevbar">' +
+            '<button class="ob-prevbtn" type="button" id="obPrevBtn"><i class="fas fa-eye"></i> معاينة الاضبارة</button>' +
+            '<span class="ob-prevhint">شاهد كيف ستظهر هذه الخانات في ملف المريض.</span>' +
+          '</div>' +
+        '</div>';
+
+        var prevBtn = document.getElementById('obPrevBtn');
+        if (prevBtn) prevBtn.onclick = _obOpenChartPreview;
+
+        var _up = document.getElementById('obUsePreset');
+        if (_up) _up.onchange = function() {
+          st.presetTouched = true;   // قرار صريح من الطبيب — لا نطبّق القالب تلقائياً بعده
+          if (this.checked && st.specialty) _obApplyPreset(st.specialty);
+          else _obRemovePreset();    // ينزع خانات القالب فقط — خانات الطبيب تبقى
+          _obRender();
+        };
+        Array.prototype.forEach.call(body.querySelectorAll('.ob-cfadd'), function(b) {
+          b.onclick = function() {
+            var sc = this.getAttribute('data-add');
+            st.fields[sc].push({ label: '', type: 'text', options: [] });
+            st.preset = '';
+            _obRender(sc, st.fields[sc].length - 1);
+          };
+        });
+        Array.prototype.forEach.call(body.querySelectorAll('.ob-cfrow'), function(row) {
+          var sc = row.getAttribute('data-s'), i = +row.getAttribute('data-i');
+          /* صفوف الخانات المدمجة تُعرض كمرجع بلا data-s؛ كان st.fields[null][i]
+             يرمي TypeError فتتوقّف الحلقة من أوّل صفّ ولا يُربَط أي معالِج —
+             فيُكتب اسم الخانة في المربّع دون أن يصل إلى f.label، فتُفلتر
+             كخانة فارغة ولا تظهر في المعاينة ولا تُحفَظ في القالب. */
+          if (!sc || !st.fields[sc] || !st.fields[sc][i]) return;
+          var f = st.fields[sc][i];
+          var optIn = row.querySelector('.ob-cfopt'), warn = row.querySelector('.ob-cfwarn');
+
+          var nameIn = row.querySelector('.ob-cfin');
+          var unitWrap = row.querySelector('.ob-cfunit'), unitBtn = row.querySelector('.ob-unitbtn');
+          var roleSel = row.querySelector('.ob-cfrole');
+
+          function syncOptState() {
+            var isSel = (f.type === 'select');
+            optIn.style.display = isSel ? '' : 'none';
+            warn.style.display = (isSel && !(f.options || []).length) ? '' : 'none';
+          }
+          function syncUnit() {
+            var sug = _obUnitAllowed(f.type) ? _obSuggestUnit(f.label) : '';
+            if (sug) {
+              unitBtn.textContent = 'أضف (' + sug + ')';
+              unitBtn.setAttribute('data-u', sug);
+              unitWrap.style.display = '';
+            } else {
+              unitWrap.style.display = 'none';
+            }
+          }
+
+          // تعديل اسم خانة قادمة من القالب يجعلها ملك الطبيب، فلا تُنزَع عند إلغاء الصح
+          nameIn.oninput = function() { f.label = this.value; f.fromPreset = false; syncUnit(); _obUnmarkPreset(); };
+          unitBtn.onclick = function() {
+            var u = this.getAttribute('data-u');
+            if (!u) return;
+            f.label = (f.label || '').trim() + ' (' + u + ')';
+            nameIn.value = f.label;
+            syncUnit();
+            _obUnmarkPreset();
+          };
+          // تحديث قائمة الأدوار موضعياً — لا إعادة رسم، حفاظاً على التركيز
+          function syncRole() {
+            if (!roleSel) return;
+            var rs = _cfRolesFor(f.type || 'text', sc);
+            if (!rs.length) { roleSel.style.display = 'none'; roleSel.innerHTML = ''; return; }
+            roleSel.style.display = '';
+            roleSel.innerHTML = '<option value="">— بلا دور سريري —</option>' +
+              rs.map(function(r) {
+                return '<option value="' + r.v + '"' + (f.role === r.v ? ' selected' : '') + '>' + _obEsc(r.label) + '</option>';
+              }).join('');
+          }
+
+          row.querySelector('.ob-cfsel').onchange = function() {
+            f.type = this.value;
+            if (f.type !== 'select') { f.options = []; optIn.value = ''; }
+            if (!_cfRoleAllowed(f.role, f.type, sc)) f.role = '';   // دور لم يعد يناسب النوع
+            syncOptState();
+            syncUnit();
+            syncRole();
+            if (f.type === 'select') optIn.focus();   // الخيارات هي الخطوة التالية طبيعياً
+            _obUnmarkPreset();
+          };
+          if (roleSel) roleSel.onchange = function() {
+            var v = this.value, stole = false;
+            f.role = v;
+            if (v) {   // دور واحد لا يتكرّر — يُنزَع عن أي حقل آخر يحمله
+              ['patient', 'visit'].forEach(function(s) {
+                st.fields[s].forEach(function(o, oi) {
+                  if (o.role === v && !(s === sc && oi === i)) { o.role = ''; stole = true; }
+                });
+              });
+            }
+            if (stole) _obRender();   // حقل آخر فقد دوره — أعِد الرسم ليظهر ذلك
+            _obUnmarkPreset();
+          };
+          // نفس تحليل المخصِّص: يقبل الفاصلة العربية والإنجليزية
+          optIn.oninput = function() {
+            f.options = this.value.split(/[،,]/).map(function(s) { return s.trim(); }).filter(Boolean);
+            syncOptState();
+            _obUnmarkPreset();
+          };
+          row.querySelector('.ob-cfdel').onclick = function() {
+            st.fields[sc].splice(i, 1); st.preset = ''; _obRender();
+          };
+        });
+      }
+
+      else {
+        var _feats = [];
+        if (st.surgicalArchive) _feats.push('أرشيف العمليات');
+        if (st.orthoArchive) _feats.push('تقويم الأسنان');
+        body.innerHTML = '<div class="ob-pane ob-done">' +
+          '<div class="ob-done-hero">' +
+            '<img class="ob-done-logo" src="./icon-192.png" alt="DocBook" onerror="this.style.display=\'none\'">' +
+            '<h2>عيادتك جاهزة</h2>' +
+          '</div>' +
+          '<p>راجِع الملخّص أدناه ثم ابدأ. لن تظهر هذه الشاشة مرّة أخرى — يفتح التطبيق مباشرةً في كل دخول.</p>' +
+          '<dl class="ob-recap">' +
+            '<div><dt>الطبيب</dt><dd>' + (_obEsc(st.title) || '—') + '</dd></div>' +
+            '<div><dt>التخصّص</dt><dd>' + (_obEsc(st.specialty) || '—') + '</dd></div>' +
+            '<div><dt>الجوال</dt><dd>' + (_obEsc(st.mobile) || '—') + '</dd></div>' +
+            '<div><dt>الأرضي</dt><dd>' + (_obEsc(st.landline) || '—') + '</dd></div>' +
+            '<div><dt>العنوان</dt><dd>' + (_obEsc(st.address) || '—') + '</dd></div>' +
+            '<div><dt>الميزات</dt><dd>' + (_feats.length ? _feats.join(' · ') : '—') + '</dd></div>' +
+            '<div><dt>خانات المريض</dt><dd>' + st.fields.patient.length + ' خانة</dd></div>' +
+            '<div><dt>خانات الزيارة</dt><dd>' + st.fields.visit.length + ' خانة</dd></div>' +
+          '</dl>' +
+          '<button class="ob-btn primary" type="button" id="obStart">ابدأ الآن</button>' +
+        '</div>' +
+        '<div class="ob-launch" id="obLaunch">' +
+          '<div class="ob-ecg-wrap"><svg viewBox="0 0 300 44" preserveAspectRatio="none">' +
+            '<path class="ob-ecg" pathLength="100" d="M0,22 L50,22 L58,19 L64,22 L74,22 L84,2 L90,42 L96,22 L104,30 L112,22 L300,22"/></svg></div>' +
+          '<div class="ob-launch-txt">جارٍ تجهيز عيادتك…</div>' +
+        '</div>';
+        document.getElementById('obStart').onclick = function() {
+          var launch = document.getElementById('obLaunch');
+          if (launch) launch.classList.add('show');
+          setTimeout(closeOnboarding, 3000);
+        };
+      }
+
+      _obSyncChrome();
+
+      // الخانة المضافة حديثاً: تمرير إليها ووضع المؤشّر في اسمها
+      if (focusScope) {
+        var nrow = body.querySelector('.ob-cfrow[data-s="' + focusScope + '"][data-i="' + focusIdx + '"]');
+        if (nrow) {
+          var inp = nrow.querySelector('.ob-cfin');
+          if (inp) { try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); } }
+          var soft = !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+          // حارس: بعض الـwebviews القديمة لا تعرّف scrollIntoView — لا نُسقط مسار الإضافة لأجله
+          if (typeof nrow.scrollIntoView === 'function') {
+            nrow.scrollIntoView({ behavior: soft ? 'smooth' : 'auto', block: 'center' });
+          }
+        }
+      }
+    }
+
+    // حفظ نهائي — نفس مسار الحفظ القائم (settings/doctor عبر setDoc merge)
+    function _obFinish() {
+      var st = _obState;
+      // ★ الدور يجب أن ينجو من هنا أيضاً — كان يُمحى، فيفقد من يُعدّ «نسائية»
+      //   من هذه الشاشة حاسبةَ الحمل بينما تعمل لمن مرّ بمخصِّص الإعدادات.
+      function clean(scope) {
+        return function(arr) {
+          return arr.filter(function(f) { return (f.label || '').trim(); }).map(function(f) {
+            var t = f.type || 'text';
+            return {
+              id: f.id || (typeof _cfNewId === 'function' ? _cfNewId() : ('f' + Date.now() + Math.random().toString(36).slice(2, 7))),
+              label: f.label.trim(),
+              type: t,
+              options: t === 'select' ? (f.options || []) : [],
+              role: (typeof _cfRoleAllowed === 'function' && _cfRoleAllowed(f.role, t, scope)) ? f.role : ''
+            };
+          });
+        };
+      }
+      if (typeof settings === 'undefined' || !settings) settings = {};
+      settings.title     = st.title.trim() || 'لوحة الطبيب';
+      settings.specialty = st.specialty || '';
+      settings.address   = st.address.trim();
+      settings.mobile    = st.mobile.trim();
+      settings.landline  = st.landline.trim();
+      if (st.logo) settings.logo = st.logo;
+      settings.chartTemplate = {
+        patient: clean('patient')(st.fields.patient),
+        visit: clean('visit')(st.fields.visit),
+        dental: /أسنان|اسنان|dental/i.test(st.specialty || '')
+      };
+      // الميزات المختارة من قسم التخصّص — التقويم للأسنان فقط
+      settings.surgicalArchive = !!st.surgicalArchive;
+      settings.orthoArchive = /أسنان|اسنان|dental/i.test(st.specialty || '') && !!st.orthoArchive;
+      settings.onboarded = true;
+      settings.onboardedAt = Date.now();
+
+      saveSettingsToLocal(settings);
+      if (typeof applySettings === 'function') applySettings();
+
+      st.step = OB_DONE;
+      _obRender();
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+      var px = document.getElementById('obPrevClose'), pane = document.getElementById('obPreview');
+      if (px) px.onclick = _obCloseChartPreview;
+      if (pane) pane.onclick = function(e) { if (e.target === this) _obCloseChartPreview(); };
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && pane && pane.classList.contains('show')) _obCloseChartPreview();
+      });
+
+      var next = document.getElementById('obNext'), back = document.getElementById('obBack');
+      if (next) next.onclick = function() {
+        if (!_obState) return;
+        if (_obState.step === OB_LAST_EDIT) { _obFinish(); return; }
+        if (_obState.step < OB_DONE) { _obState.step++; _obRender(); }
+      };
+      if (back) back.onclick = function() {
+        if (_obState && _obState.step > 0) { _obState.step--; _obRender(); }
+      };
+    });

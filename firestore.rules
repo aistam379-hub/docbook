@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* =====================================================================
+       أدوار الكادر — عند تفعيل كل عيادة: ضع بريد الطبيب والممرّضة هنا فقط.
+       (نفس الإيميلات تُوضع أيضاً في config.js لتوجيه الواجهة، لكن مصدر
+        الأمان الحقيقي هو هذا الملف على الخادم.)
+       ===================================================================== */
+    function isDoctor() {
+      return request.auth != null
+          && request.auth.token.email_verified == true
+          && request.auth.token.email in ['aistam379@gmail.com', 'ahmadtaim450@gmail.com'];
+    }
+    function isNurse() {
+      return request.auth != null
+          && request.auth.token.email_verified == true
+          && request.auth.token.email in ['nawwacode@gmail.com'];
+    }
+    function isStaff() { return isDoctor() || isNurse(); }
+
+    /* أداة تحقّق: قيمة نصية بطول أقصى محدّد (تحمي من إغراق الحقول) */
+    function strMax(v, max) { return v is string && v.size() <= max; }
+
+    /* مستندات الأدوار/المستخدمين */
+    match /users/{uid} {
+      allow read:  if isStaff();
+      allow write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    /* بيانات حسّاسة — للكادر فقط */
+    match /patients/{id} { allow read, write: if isStaff(); }
+    match /alerts/{id}   { allow read, write: if isStaff(); }
+    match /notes/{id}    { allow read, write: if isStaff(); }
+
+    /* المواعيد:
+       - الكادر: قراءة/تعديل/حذف/إنشاء كامل.
+       - صفحة الحجز العامة: إنشاء فقط، مع تحقّق صارم من الحقول وأطوالها
+         ومنع أي حقل إضافي (يقطع الإغراق وحقن البيانات). */
+    match /appointments/{id} {
+      allow read, update, delete: if isStaff();
+      allow create: if isStaff() || (
+           request.resource.data.Status == 'Pending'
+        && request.resource.data.source == 'online'
+        && strMax(request.resource.data.PatientName, 80)
+        && strMax(request.resource.data.Phone, 25)
+        && strMax(request.resource.data.Date, 10)
+        && strMax(request.resource.data.Slot, 40)
+        && strMax(request.resource.data.VisitType, 60)
+        && request.resource.data.keys().hasOnly(
+             ['id','PatientName','Phone','BirthDate','Address','VisitType','Date','Slot','Status','source','createdAt'])
+      );
+    }
+
+    /* أقفال الأوقات:
+       - قراءة عامة (صفحة الحجز تحتاج معرفة الأوقات المحجوزة — لا تحوي بيانات مريض).
+       - إنشاء عام مُتحقَّق منه (يمنع قفل كل الأوقات بحقول عشوائية).
+       - التعديل/الحذف للكادر فقط (القفل لا يُفكّ إلا من العيادة). */
+    match /bookedSlots/{id} {
+      allow read: if true;
+      allow create: if isStaff() || (
+           request.resource.data.status == 'booked'
+        && strMax(request.resource.data.date, 10)
+        && strMax(request.resource.data.time, 40)
+        && strMax(request.resource.data.apptId, 60)
+        && request.resource.data.keys().hasOnly(['date','time','apptId','status','createdAt'])
+      );
+      allow update, delete: if isStaff();
+    }
+
+    /* الإعدادات العامة التي تحتاجها صفحة الحجز فقط (مفتوحة للقراءة) */
+    match /config/closedDays { allow read: if true; allow write: if isStaff(); }
+    match /config/booking    { allow read: if true; allow write: if isStaff(); }
+
+    /* بقية مستندات config (contacts / customAlert / customMsgs ...) — كادر فقط
+       (كانت مكشوفة للعلن سابقاً بسبب قاعدة config العامة). */
+    match /config/{doc}      { allow read, write: if isStaff(); }
+
+    /* settings (تفضيلات/شعار الكادر) — كادر فقط (صفحة الحجز لا تحتاجها) */
+    match /settings/{doc}    { allow read, write: if isStaff(); }
+
+    /* أي مسار آخر غير معرَّف — مرفوض افتراضياً */
+    match /{document=**} { allow read, write: if false; }
+  }
+}

@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>دكتورا - رعاية أسنان عائلية</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['"IBM Plex Sans Arabic"', 'sans-serif'] },
+                    colors: {
+                        brand: {
+                            cyan: '#48b8c2',
+                            dark: '#1a1a1a',
+                            gray: '#6b7280',
+                            lightGray: '#f5f5f5'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        html, body { scroll-behavior: smooth; overflow-x: hidden; width: 100%; position: relative; }
+
+        .glass-panel { background: rgba(15, 23, 42, 0.45); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .header-scrolled { background: rgba(26, 26, 26, 0.9) !important; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); padding-top: 0.75rem !important; padding-bottom: 0.75rem !important; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+        .glass-nav { background: rgba(255, 255, 255, 0.15); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+        .hero-bg { background-image: url('https://i.postimg.cc/dtSdyYdC/426180b0-4caf-11f1-8e41-1b53084678f7.png'); background-size: cover; background-position: center right; }
+        .hero-overlay { background: linear-gradient(to left, rgba(15,23,42,0.7) 0%, rgba(15,23,42,0.3) 50%, rgba(15,23,42,0) 100%); }
+
+        @media (max-width: 768px) {
+            .hero-bg { background-position: 80% center; min-height: 100vh; }
+            .hero-overlay { background: linear-gradient(to top, rgba(15,23,42,0.9) 0%, rgba(15,23,42,0.4) 100%); }
+            h1 { font-size: 2.5rem !important; line-height: 1.2 !important; }
+            .hero-content-wrapper { padding-top: 20vh !important; }
+        }
+
+        @media (max-width: 640px) {
+            section { padding-top: 4rem !important; padding-bottom: 4rem !important; }
+            .grid { gap: 1.5rem !important; }
+            #contact .bg-gradient-to-br { padding: 1.5rem !important; border-radius: 24px !important; }
+            #contact h3 { font-size: 1.5rem !important; }
+            .flex.justify-center.gap-2.mb-8 { gap: 0.25rem !important; }
+            .w-10.h-10.rounded-full { width: 2rem !important; height: 2rem !important; font-size: 0.75rem !important; }
+            #contactCalGrid button { width: 100% !important; height: 2.5rem !important; font-size: 0.75rem !important; }
+            .grid-cols-7 { gap: 0.25rem !important; }
+        }
+
+        .ticker-pattern { background-image: repeating-linear-gradient(90deg, #d1d5db, #d1d5db 1px, transparent 1px, transparent 4px); height: 16px; width: 100px; flex-shrink: 0; }
+        .text-outline-subtle { text-shadow: 0px 4px 12px rgba(0,0,0,0.3); }
+        .gallery-img { transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+        .gallery-img:hover { transform: scale(1.05); filter: brightness(1.1); }
+
+        .mobile-sidebar { position: fixed; right: -100%; top: 0; width: 280px; height: 100vh; background: rgba(26, 26, 26, 0.98); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-left: 1px solid rgba(255, 255, 255, 0.1); z-index: 40; transition: right 0.3s ease-in-out; overflow-y: auto; padding-top: 80px; padding-right: 20px; padding-left: 20px; }
+        .mobile-sidebar.active { right: 0; }
+        .mobile-sidebar-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.5); z-index: 30; opacity: 0; visibility: hidden; transition: opacity 0.3s ease-in-out, visibility 0.3s ease-in-out; }
+        .mobile-sidebar-overlay.active { opacity: 1; visibility: visible; }
+        .mobile-sidebar a { display: block; color: white; text-decoration: none; padding: 16px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1); font-size: 16px; font-weight: 500; transition: color 0.3s ease; }
+        .mobile-sidebar a:hover, .mobile-sidebar a:active { color: #48b8c2; }
+        .mobile-menu-btn { display: none; background: none; border: none; color: white; cursor: pointer; padding: 8px; z-index: 50; }
+        @media (max-width: 1024px) {
+            .mobile-menu-btn { display: block; }
+            header { padding: 1rem !important; }
+            header nav { display: none !important; }
+            header a:last-child { display: none !important; }
+        }
+
+        /* ──── Booking Modal ──── */
+        .booking-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.6); z-index: 100; opacity: 0; visibility: hidden; transition: opacity 0.3s ease-in-out, visibility 0.3s ease-in-out; overflow-y: auto; padding: 20px; }
+        .booking-modal-overlay.active { opacity: 1; visibility: visible; }
+        .booking-modal { background: white; border-radius: 24px; max-width: 500px; margin: 40px auto; padding: 32px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); animation: slideUp 0.3s ease-out; }
+        @keyframes slideUp { from { transform: translateY(30px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .booking-close-btn { position: absolute; top: 16px; left: 16px; background: #f0f0f0; border: none; width: 40px; height: 40px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; color: #333; font-size: 20px; transition: background 0.2s; }
+        .booking-close-btn:hover { background: #e0e0e0; }
+        .booking-steps-bar { display: flex; align-items: center; justify-content: center; gap: 0; margin-bottom: 28px; }
+        .booking-step-dot { width: 32px; height: 32px; border-radius: 50%; border: 2px solid #e0e0e0; background: white; color: #999; font-size: 0.78rem; font-weight: 800; display: flex; align-items: center; justify-content: center; transition: all 0.3s; flex-shrink: 0; }
+        .booking-step-dot.active { border-color: #48b8c2; background: #48b8c2; color: white; box-shadow: 0 0 0 4px rgba(72, 184, 194, 0.15); }
+        .booking-step-dot.done { border-color: #16a34a; background: #16a34a; color: white; }
+        .booking-step-line { flex: 1; height: 2px; background: #e0e0e0; max-width: 56px; transition: background 0.3s; }
+        .booking-step-line.done { background: #16a34a; }
+        .booking-form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+        .booking-form-label { font-size: 0.82rem; font-weight: 700; color: #666; }
+        .booking-form-input { width: 100%; padding: 11px 14px; border: 1.5px solid #d0d0d0; border-radius: 10px; font-family: inherit; font-size: 0.92rem; color: #333; background: white; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
+        .booking-form-input:focus { border-color: #48b8c2; box-shadow: 0 0 0 3px rgba(72, 184, 194, 0.12); }
+        .booking-form-input.invalid { border-color: #dc2626; }
+        .booking-form-input::placeholder { color: #999; }
+        select.booking-form-input { cursor: pointer; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23999' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: left 14px center; padding-left: 36px; }
+        .booking-cal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+        .booking-cal-nav { width: 34px; height: 34px; border-radius: 9px; border: 1.5px solid #d0d0d0; background: white; color: #999; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+        .booking-cal-nav:hover { border-color: #48b8c2; color: #48b8c2; background: #f0fdfa; }
+        .booking-cal-month { font-weight: 700; font-size: 0.92rem; color: #333; }
+        .booking-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; text-align: center; }
+        .booking-cal-day-name { font-size: 0.65rem; font-weight: 700; color: #999; padding: 4px 0; }
+        .booking-cal-day { padding: 9px 2px; border-radius: 9px; cursor: pointer; border: 1.5px solid transparent; background: transparent; color: #333; font-size: 0.82rem; font-weight: 600; font-family: inherit; transition: all 0.15s; }
+        .booking-cal-day:not(.disabled):hover { background: #f0fdfa; border-color: #d0d0d0; }
+        .booking-cal-day.today { color: #48b8c2; border-color: #48b8c2; font-weight: 800; }
+        .booking-cal-day.selected { background: #48b8c2 !important; color: white !important; border-color: transparent !important; box-shadow: 0 2px 8px rgba(72, 184, 194, 0.35); }
+        .booking-cal-day.disabled { opacity: 0.3; cursor: not-allowed; pointer-events: none; }
+        .booking-cal-day.closed { opacity: 0.35; cursor: not-allowed; pointer-events: none; text-decoration: line-through; }
+        .booking-summary-box { background: #ccfbf1; border: 1.5px solid #81e6d9; border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+        .booking-summary-row { display: flex; align-items: center; justify-content: space-between; font-size: 0.85rem; }
+        .booking-summary-row .label { color: #666; font-weight: 600; }
+        .booking-summary-row .value { font-weight: 700; color: #333; }
+        .booking-btn-primary { width: 100%; background: #48b8c2; color: white; border: none; border-radius: 10px; padding: 13px 18px; font-weight: 800; font-size: 0.95rem; font-family: inherit; cursor: pointer; transition: background 0.15s, transform 0.1s; display: flex; align-items: center; justify-content: center; gap: 8px; }
+        .booking-btn-primary:hover { background: #3ca0a8; }
+        .booking-btn-primary:active { transform: scale(0.98); }
+        .booking-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .booking-btn-secondary { width: 100%; background: #e2e8f0; color: #475569; border: none; border-radius: 10px; padding: 12px 18px; font-weight: 700; font-size: 0.9rem; font-family: inherit; cursor: pointer; transition: background 0.15s; display: flex; align-items: center; justify-content: center; gap: 8px; }
+        .booking-btn-secondary:hover { background: #cbd5e1; }
+        .booking-btns-row { display: flex; gap: 10px; margin-top: 6px; }
+        .booking-btns-row .booking-btn-primary, .booking-btns-row .booking-btn-secondary { flex: 1; }
+        .booking-section-title { font-size: 0.78rem; font-weight: 800; color: #48b8c2; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+        .booking-section-title::after { content: ''; flex: 1; height: 1.5px; background: #d0d0d0; }
+        .booking-field-error { font-size: 0.75rem; color: #dc2626; display: none; }
+        .booking-success-screen { text-align: center; padding: 20px 0; }
+        .booking-success-icon { width: 80px; height: 80px; border-radius: 50%; background: #dcfce7; display: inline-flex; align-items: center; justify-content: center; font-size: 2rem; color: #16a34a; margin-bottom: 16px; box-shadow: 0 0 0 8px rgba(22, 163, 74, 0.08); animation: popIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        @keyframes popIn { from { transform: scale(0); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        .booking-success-screen h2 { font-size: 1.3rem; font-weight: 800; color: #333; margin-bottom: 8px; }
+        .booking-success-screen p { font-size: 0.88rem; color: #666; line-height: 1.6; }
+        .booking-success-summary { background: #ccfbf1; border: 1.5px solid #81e6d9; border-radius: 14px; padding: 14px 16px; margin: 18px 0; text-align: right; display: flex; flex-direction: column; gap: 8px; }
+        .booking-closed-banner { background: #fee2e2; border: 1.5px solid #fca5a5; border-radius: 10px; padding: 10px 14px; font-size: 0.82rem; color: #dc2626; font-weight: 700; display: none; align-items: center; gap: 8px; margin-bottom: 12px; }
+        @media (max-width: 480px) { .booking-modal { padding: 24px 16px; margin: 20px auto; } }
+    </style>
+
+    <!-- ═══════ Firebase SDK ═══════ -->
+    <!-- إعدادات العميل (Firebase) -->
+    <script src="config.js"></script>
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+        import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+                 doc, collection, addDoc, setDoc, getDoc, onSnapshot, serverTimestamp, query, where }
+          from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+
+        const firebaseConfig = window.FIREBASE_CONFIG;   // ← يأتي من config.js (الملف الوحيد للتعديل)
+        const _app = initializeApp(firebaseConfig);
+        // كاش محلّي دائم (IndexedDB): الزوّار المتكرّرون يقرؤون من الكاش لا من الخادم — تقليل القراءات
+        let _db;
+        try {
+          _db = initializeFirestore(_app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
+        } catch (e) {
+          _db = getFirestore(_app);
+        }
+
+        window._fb = {
+            col:        (...p)   => collection(_db, ...p),
+            docRef:     (...p)   => doc(_db, ...p),
+            addDoc:     (ref, d) => addDoc(ref, d),
+            setDoc:     (ref, d) => setDoc(ref, d),
+            getDoc:     (...p)   => getDoc(doc(_db, ...p)),
+            onSnapshot, serverTimestamp,
+        };
+        window._fbReady = true;
+        window.dispatchEvent(new Event('fbReady'));
+
+        // الأيام المغلقة (مصدر مشترك مع الممرضة)
+        window._closedDaysCache = [];
+        const _cdRef = doc(_db, 'config', 'closedDays');
+        getDoc(_cdRef).then(function(snap) {
+            window._closedDaysCache = snap.exists() ? (snap.data().list || []) : [];
+        });
+        onSnapshot(_cdRef, function(snap) {
+            window._closedDaysCache = snap.exists() ? (snap.data().list || []) : [];
+            if (typeof bookingRenderCalendar === 'function' &&
+                document.getElementById('bookingStep2') &&
+                document.getElementById('bookingStep2').style.display !== 'none') bookingRenderCalendar();
+            if (typeof contactRenderCalendar === 'function' &&
+                document.getElementById('contactFormStep2') &&
+                document.getElementById('contactFormStep2').style.display !== 'none') contactRenderCalendar();
+        });
+
+        // إعدادات الحجز (أوقات الدوام + العطل الأسبوعية) — مصدر موحّد مع الممرضة
+        window._bookingSlots = null;
+        window._bookingWeeklyOff = [];
+        const _bkRef = doc(_db, 'config', 'booking');
+        function _applyBookingCfg(snap) {
+            const data = snap.exists() ? (snap.data() || {}) : {};
+            if (Array.isArray(data.slots) && data.slots.length) window._bookingSlots = data.slots;
+            window._bookingWeeklyOff = Array.isArray(data.weeklyOff) ? data.weeklyOff : [];
+            if (typeof applyBookingConfig === 'function') applyBookingConfig();
+        }
+        getDoc(_bkRef).then(_applyBookingCfg);
+        onSnapshot(_bkRef, _applyBookingCfg);
+
+        /* الأوقات المحجوزة — لمنع الحجز المزدوج.
+           نافذة ٦٠ يوماً لا «كل المستقبل»: كانت القراءة تساوي عدد كل الحجوزات القادمة،
+           فتُضرب في عدد زوّار الصفحة — أي أن التكلفة تنمو مع نجاح العيادة، وأنجح
+           عيادة أول من يتجاوز الحصّة. حقل واحد بحدّين ⇒ بلا فهرس مركّب. */
+        window._bookedSlots = {};
+        (function(){
+            var _iso = function(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); };
+            var _n = new Date();
+            var _todayStr = _iso(_n);
+            var _end = new Date(_n); _end.setDate(_end.getDate() + 60);
+            var _endStr = _iso(_end);
+            window._bookedSlotsWindowEnd = _endStr;   // يقرأه التقويم ليمنع الحجز خارج النافذة
+            onSnapshot(query(collection(_db, 'bookedSlots'),
+                             where('date', '>=', _todayStr), where('date', '<=', _endStr)), function(snap) {
+                const m = {}; snap.forEach(function(d){ m[d.id] = d.data(); });
+                window._bookedSlots = m;
+            });
+        })();
+    </script>
+</head>
+<body class="bg-white text-brand-dark antialiased overflow-x-hidden">
+
+    <!-- Mobile Sidebar Overlay -->
+    <div id="sidebar-overlay" class="mobile-sidebar-overlay"></div>
+
+    <!-- Mobile Sidebar Navigation -->
+    <nav id="mobile-sidebar" class="mobile-sidebar">
+        <a href="#home" onclick="closeSidebar()">الرئيسية</a>
+        <a href="#services" onclick="closeSidebar()">الخدمات</a>
+        <a href="#about" onclick="closeSidebar()">من نحن</a>
+        <a href="#contact" onclick="closeSidebar()">اتصل بنا</a>
+        <a href="#contact" class="bg-brand-cyan text-black px-4 py-3 rounded-full font-semibold mt-6 text-center block hover:bg-[#3ca0a8] transition-colors" onclick="closeSidebar();">احجز موعداً</a>
+    </nav>
+
+    <!-- Booking Modal -->
+    <div id="bookingModalOverlay" class="booking-modal-overlay">
+        <div class="booking-modal" style="position: relative;">
+            <button class="booking-close-btn" onclick="closeBookingModal()">
+                <i class="fas fa-times"></i>
+            </button>
+
+            <div class="booking-steps-bar" id="bookingStepsBar">
+                <div class="booking-step-dot active" id="bookingDot1">١</div>
+                <div class="booking-step-line" id="bookingLine1"></div>
+                <div class="booking-step-dot" id="bookingDot2">٢</div>
+                <div class="booking-step-line" id="bookingLine2"></div>
+                <div class="booking-step-dot" id="bookingDot3">٣</div>
+            </div>
+
+            <!-- Step 1: Patient Info -->
+            <div id="bookingStep1">
+                <div class="booking-section-title"><i class="fas fa-user"></i> بيانات المريض</div>
+
+                <div class="booking-form-group">
+                    <label class="booking-form-label">الاسم الكامل <span style="color:#dc2626">*</span></label>
+                    <input type="text" id="bookingPatientName" class="booking-form-input" placeholder="أدخل اسمك الكامل">
+                    <span class="booking-field-error" id="bookingErrName">يرجى إدخال الاسم الكامل</span>
+                </div>
+
+                <div class="booking-form-group">
+                    <label class="booking-form-label">رقم الهاتف <span style="color:#dc2626">*</span></label>
+                    <input type="tel" id="bookingPatientPhone" class="booking-form-input" placeholder="09xxxxxxxx" dir="ltr">
+                    <span class="booking-field-error" id="bookingErrPhone">يرجى إدخال رقم هاتف صحيح</span>
+                </div>
+
+                <div class="booking-form-group">
+                    <label class="booking-form-label">تاريخ الميلاد <span style="color:#dc2626">*</span></label>
+                    <input type="date" id="bookingPatientBirth" class="booking-form-input">
+                    <span class="booking-field-error" id="bookingErrBirth">يرجى إدخال تاريخ الميلاد</span>
+                </div>
+
+                <div class="booking-form-group" style="margin-bottom:0;">
+                    <label class="booking-form-label">نوع الزيارة <span style="color:#dc2626">*</span></label>
+                    <select id="bookingVisitType" class="booking-form-input">
+                        <option value="">-- اختر نوع الزيارة --</option>
+                        <option value="كشف جديد">كشف جديد</option>
+                        <option value="مراجعة">مراجعة</option>
+                        <option value="تحاليل">تحاليل</option>
+                    </select>
+                    <span class="booking-field-error" id="bookingErrType">يرجى اختيار نوع الزيارة</span>
+                </div>
+
+                <div style="margin-top: 22px;">
+                    <button class="booking-btn-primary" onclick="bookingGoStep2()">
+                        التالي <i class="fas fa-arrow-left"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Step 2: Date + Time Slot -->
+            <div id="bookingStep2" style="display:none;">
+                <div class="booking-section-title"><i class="fas fa-calendar-alt"></i> اختر التاريخ والوقت</div>
+
+                <div class="booking-closed-banner" id="bookingClosedBanner">
+                    <i class="fas fa-ban"></i>
+                    هذا اليوم مغلق — الرجاء اختيار يوم آخر
+                </div>
+
+                <div style="background:#f0fdfa; border:1.5px solid #d0d0d0; border-radius:14px; padding:14px; margin-bottom:16px;">
+                    <div class="booking-cal-header">
+                        <button class="booking-cal-nav" id="bookingCalPrev" onclick="bookingCalNav(-1)"><i class="fas fa-chevron-right"></i></button>
+                        <span class="booking-cal-month" id="bookingCalMonthLabel">—</span>
+                        <button class="booking-cal-nav" id="bookingCalNext" onclick="bookingCalNav(1)"><i class="fas fa-chevron-left"></i></button>
+                    </div>
+                    <div class="booking-cal-grid" style="margin-bottom:6px;">
+                        <div class="booking-cal-day-name">سبت</div>
+                        <div class="booking-cal-day-name">جمعة</div>
+                        <div class="booking-cal-day-name">خميس</div>
+                        <div class="booking-cal-day-name">أربعاء</div>
+                        <div class="booking-cal-day-name">ثلاثاء</div>
+                        <div class="booking-cal-day-name">إثنين</div>
+                        <div class="booking-cal-day-name">أحد</div>
+                    </div>
+                    <div class="booking-cal-grid" id="bookingCalGrid"></div>
+                </div>
+
+                <div id="bookingSelectedDateDisplay" style="display:none; background:#fef3c7; border:1.5px solid #fcd34d; border-radius:10px; padding:10px 14px; font-size:0.85rem; font-weight:700; color:#d97706; text-align:center; margin-bottom:14px;">
+                    <i class="fas fa-calendar-check" style="margin-left:6px;"></i>
+                    <span id="bookingSelectedDateText">—</span>
+                </div>
+
+                <span class="booking-field-error" id="bookingErrDate" style="text-align:center; margin-bottom:10px; display:none;">يرجى اختيار تاريخ</span>
+
+                <div id="bookingTimeSlotContainer" style="display:none; margin-bottom:16px;">
+                    <div class="booking-section-title"><i class="fas fa-clock"></i> اختر الوقت</div>
+                    <div class="booking-form-group" style="margin-bottom:0;">
+                        <select id="bookingTimeSelect" class="booking-form-input">
+                            <option value="">-- اختر الوقت --</option>
+                        </select>
+                    </div>
+                    <span class="booking-field-error" id="bookingErrPeriod" style="margin-top:6px; display:none;">يرجى اختيار الوقت</span>
+                </div>
+
+                <div class="booking-btns-row">
+                    <button class="booking-btn-secondary" onclick="bookingGoStep(1)"><i class="fas fa-arrow-right"></i> رجوع</button>
+                    <button class="booking-btn-primary" onclick="bookingGoStep3()">التالي <i class="fas fa-arrow-left"></i></button>
+                </div>
+            </div>
+
+            <!-- Step 3: Confirm -->
+            <div id="bookingStep3" style="display:none;">
+                <div class="booking-section-title"><i class="fas fa-check-circle"></i> مراجعة وتأكيد</div>
+
+                <div class="booking-summary-box" id="bookingSummaryBox" style="margin-bottom:20px;"></div>
+
+                <p style="font-size:0.78rem; color:#666; text-align:center; margin-bottom:16px; line-height:1.6;">
+                    سيتم إرسال الطلب للممرضة وستتواصل معك بعد التأكيد
+                </p>
+
+                <div class="booking-btns-row">
+                    <button class="booking-btn-secondary" onclick="bookingGoStep(2)"><i class="fas fa-arrow-right"></i> رجوع</button>
+                    <button class="booking-btn-primary" id="bookingSubmitBtn" onclick="bookingSubmitBooking()">
+                        <i class="fas fa-paper-plane"></i> إرسال الطلب
+                    </button>
+                </div>
+            </div>
+
+            <!-- Success -->
+            <div id="bookingStepSuccess" style="display:none;">
+                <div class="booking-success-screen">
+                    <div class="booking-success-icon"><i class="fas fa-check"></i></div>
+                    <h2>تم إرسال طلبك!</h2>
+                    <p>سيتم مراجعة طلبك من قبل مكتب الممرضة وتأكيده في أقرب وقت</p>
+                    <div class="booking-success-summary" id="bookingSuccessSummary"></div>
+                    <button class="booking-btn-primary" onclick="bookingResetForm()" style="margin-top:8px;">
+                        <i class="fas fa-plus"></i> حجز موعد جديد
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Header -->
+    <header id="main-header" class="fixed top-0 left-0 w-full p-6 flex items-center justify-between z-50 transition-all duration-300">
+        <div class="flex items-center gap-2 text-white">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s-4-2-4-8a4 4 0 0 1 8 0c0 6-4 8-4 8z"></path>
+                <path d="M12 2v4"></path>
+                <path d="M10 6h4"></path>
+            </svg>
+            <span class="text-2xl font-semibold tracking-wide">دكتورا</span>
+        </div>
+        <nav class="hidden lg:flex items-center glass-nav rounded-full p-1 border border-white/10">
+            <a href="#home" class="nav-link px-6 py-2.5 rounded-full bg-white text-black text-sm font-medium transition-all shadow-sm">الرئيسية</a>
+            <a href="#services" class="nav-link px-6 py-2.5 rounded-full text-white hover:bg-white/10 text-sm font-medium transition-all">الخدمات</a>
+            <a href="#about" class="nav-link px-6 py-2.5 rounded-full text-white hover:bg-white/10 text-sm font-medium transition-all">من نحن</a>
+            <a href="#contact" class="nav-link px-6 py-2.5 rounded-full text-white hover:bg-white/10 text-sm font-medium transition-all">اتصل بنا</a>
+        </nav>
+        <a href="#contact" class="bg-white text-black px-6 py-3 rounded-full text-sm font-medium hover:bg-gray-100 transition-colors hidden md:block shadow-lg">احجز موعداً</a>
+        <button id="mobile-menu-btn" class="mobile-menu-btn" onclick="toggleSidebar()">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="3" y1="6" x2="21" y2="6"></line>
+                <line x1="3" y1="12" x2="21" y2="12"></line>
+                <line x1="3" y1="18" x2="21" y2="18"></line>
+            </svg>
+        </button>
+    </header>
+
+    <!-- HERO -->
+    <section id="home" class="relative w-full min-h-screen overflow-hidden hero-bg">
+        <div class="absolute inset-0 hero-overlay"></div>
+        <div class="absolute inset-0 z-10 flex flex-col justify-center px-6 md:px-20 lg:px-24 pt-16 hero-content-wrapper">
+            <div class="max-w-2xl mt-10">
+                <h1 class="text-white text-5xl md:text-[72px] font-semibold mb-6 text-outline-subtle leading-[1.2]">
+                    رعاية أسنان <br>
+                    <span class="mr-12 md:mr-24 text-brand-cyan">تناسب العائلة</span>
+                </h1>
+                <p class="text-white/90 text-lg md:text-xl max-w-md mb-10 font-light leading-relaxed text-outline-subtle">
+                    حلول دائمة وذات مظهر طبيعي لتعويض الأسنان المفقودة واستعادة الابتسامات الصحية الواثقة بأحدث التقنيات.
+                </p>
+                <a href="#contact" class="inline-flex bg-white rounded-full pl-2 pr-6 py-2 items-center gap-4 hover:scale-105 transition-transform duration-300 group shadow-xl">
+                    <span class="text-black font-semibold text-[15px]">احجز موعداً</span>
+                    <div class="bg-brand-cyan w-10 h-10 rounded-full flex items-center justify-center text-white group-hover:bg-[#3ca0a8] transition-colors">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="scale-x-[-1]">
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                            <polyline points="12 5 19 12 12 19"></polyline>
+                        </svg>
+                    </div>
+                </a>
+            </div>
+            <div class="absolute bottom-32 left-6 md:left-20 lg:left-24 flex flex-col gap-3 items-start hidden lg:flex z-20">
+                <div class="flex gap-3">
+                    <div class="glass-panel text-white font-medium px-6 py-3 rounded-full text-sm border border-white/20 hover:bg-white/20 transition-colors cursor-default">تقويم الأسنان</div>
+                    <div class="glass-panel text-white font-medium px-6 py-3 rounded-full text-sm border border-white/20 hover:bg-white/20 transition-colors cursor-default">زراعة الأسنان</div>
+                </div>
+                <div class="flex gap-3">
+                    <div class="glass-panel text-white font-medium px-6 py-3 rounded-full text-sm border border-white/20 hover:bg-white/20 transition-colors cursor-default">ابتسامة هوليود</div>
+                    <div class="glass-panel text-white font-medium px-6 py-3 rounded-full text-sm border border-white/20 hover:bg-white/20 transition-colors cursor-default">علاج العصب</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- TICKER -->
+    <section class="w-full py-10 border-b border-gray-100 flex items-center justify-between overflow-hidden bg-gray-50">
+        <div class="ticker-pattern"></div>
+        <span class="text-xs md:text-sm font-bold uppercase tracking-wider text-gray-600 whitespace-nowrap mx-4">أحدث الأجهزة الطبية</span>
+        <div class="ticker-pattern"></div>
+        <span class="text-xs md:text-sm font-bold uppercase tracking-wider text-gray-600 whitespace-nowrap mx-4">كادر طبي متخصص</span>
+        <div class="ticker-pattern"></div>
+        <span class="text-xs md:text-sm font-bold uppercase tracking-wider text-gray-600 whitespace-nowrap mx-4">تعقيم بأعلى المعايير</span>
+        <div class="ticker-pattern hidden md:block"></div>
+    </section>
+
+    <!-- ABOUT -->
+    <section id="about" class="max-w-[1400px] mx-auto px-6 md:px-12 lg:px-20 py-24">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16">
+            <div class="lg:col-span-5">
+                <span class="inline-block border border-gray-200 bg-gray-50 rounded-full px-6 py-2 text-sm font-bold text-brand-cyan mb-8">من نحن</span>
+                <h2 class="text-3xl md:text-[46px] font-semibold text-brand-dark leading-[1.3] mb-8">
+                    نحن نؤمن أن كل ابتسامة <br>تحكي <span class="text-brand-cyan">قصة نجاح</span> فريدة
+                </h2>
+                <p class="text-gray-600 text-lg mb-12 leading-relaxed">
+                    في دكتورا، نجمع بين الفن والعلم لنمنحك أفضل تجربة علاجية. عيادتنا مجهزة بأحدث تقنيات التصوير والزراعة الرقمية لضمان الدقة والراحة.
+                </p>
+                <div class="grid grid-cols-2 gap-8 mb-12">
+                    <div><h3 class="text-4xl font-bold text-brand-dark mb-1">15+</h3><p class="text-sm text-gray-500 font-medium">سنة من الخبرة</p></div>
+                    <div><h3 class="text-4xl font-bold text-brand-dark mb-1">10k</h3><p class="text-sm text-gray-500 font-medium">عملية ناجحة</p></div>
+                </div>
+                <div class="flex items-center gap-4 p-6 bg-brand-cyan/5 rounded-[32px] border border-brand-cyan/10">
+                    <img src="https://images.unsplash.com/photo-1559839734-2b71f1536783?q=80&w=200&auto=format&fit=crop" class="w-16 h-16 rounded-full object-cover" alt="دكتور متخصص">
+                    <div>
+                        <h4 class="font-bold text-brand-dark">د. سارة الأحمد</h4>
+                        <p class="text-xs text-gray-500">كبيرة أخصائيي تجميل الأسنان</p>
+                    </div>
+                </div>
+            </div>
+            <div class="lg:col-span-7">
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-4 h-full">
+                    <div class="col-span-2 md:col-span-2 row-span-2">
+                        <img src="https://images.unsplash.com/photo-1588776814546-1ffcf47267a5?q=80&w=1000&auto=format&fit=crop" alt="عيادة حديثة" class="w-full h-full object-cover rounded-[32px] shadow-lg gallery-img">
+                    </div>
+                    <div class="col-span-1">
+                        <img src="https://images.unsplash.com/photo-1445527815219-ecbfec67492e?q=80&w=500&auto=format&fit=crop" alt="أدوات طبية" class="w-full h-48 md:h-64 object-cover rounded-[32px] shadow-md gallery-img">
+                    </div>
+                    <div class="col-span-1">
+                        <img src="https://images.unsplash.com/photo-1609840114035-3c981b782dfe?q=80&w=500&auto=format&fit=crop" alt="فحص دقيق" class="w-full h-48 md:h-64 object-cover rounded-[32px] shadow-md gallery-img">
+                    </div>
+                    <div class="col-span-2 md:col-span-3">
+                        <img src="https://images.unsplash.com/photo-1579684385127-1ef15d508118?q=80&w=1000&auto=format&fit=crop" alt="ابتسامة واثقة" class="w-full h-48 md:h-60 object-cover rounded-[32px] shadow-lg gallery-img">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- SERVICES -->
+    <section id="services" class="bg-gray-50 py-24">
+        <div class="max-w-[1400px] mx-auto px-6 md:px-12 lg:px-20">
+            <div class="text-center mb-16">
+                <span class="inline-block border border-brand-cyan/30 bg-brand-cyan/10 rounded-full px-6 py-2 text-sm font-bold text-brand-cyan mb-4">خدماتنا</span>
+                <h2 class="text-3xl md:text-5xl font-semibold text-brand-dark">عناية شاملة لأسنانك</h2>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                <div class="group bg-white p-2 rounded-[40px] shadow-sm hover:shadow-xl transition-all duration-500 border border-gray-100 overflow-hidden">
+                    <img src="https://images.unsplash.com/photo-1460672985063-6764ac8b9c74?q=80&w=500&auto=format&fit=crop" alt="تجميل الأسنان" class="w-full h-56 object-cover rounded-[36px] mb-4 group-hover:scale-105 transition-transform duration-500">
+                    <div class="p-6"><h3 class="text-2xl font-bold mb-3 text-brand-dark">تجميل الأسنان</h3><p class="text-gray-600">نقدّم حلول الفينير والكراون المتقدمة للحصول على ابتسامة مثالية طبيعية.</p></div>
+                </div>
+                <div class="group bg-white p-2 rounded-[40px] shadow-sm hover:shadow-xl transition-all duration-500 border border-gray-100 overflow-hidden">
+                    <img src="https://images.unsplash.com/photo-1516549655169-df83a0774514?q=80&w=500&auto=format&fit=crop" alt="زراعة الأسنان" class="w-full h-56 object-cover rounded-[36px] mb-4 group-hover:scale-105 transition-transform duration-500">
+                    <div class="p-6"><h3 class="text-2xl font-bold mb-3 text-brand-dark">زراعة الأسنان</h3><p class="text-gray-600">تعويض الأسنان المفقودة بجذور تيتانيوم تدوم طويلاً وبتقنية ثلاثية الأبعاد.</p></div>
+                </div>
+                <div class="group bg-white p-2 rounded-[40px] shadow-sm hover:shadow-xl transition-all duration-500 border border-gray-100 overflow-hidden">
+                    <img src="https://images.unsplash.com/photo-1606811971618-4486d14f3f99?q=80&w=500&auto=format&fit=crop" alt="علاج الأطفال" class="w-full h-56 object-cover rounded-[36px] mb-4 group-hover:scale-105 transition-transform duration-500">
+                    <div class="p-6"><h3 class="text-2xl font-bold mb-3 text-brand-dark">طب أسنان الأطفال</h3><p class="text-gray-600">بيئة صديقة ومرحة للأطفال لضمان صحة أسنانهم منذ الصغر بدون خوف.</p></div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- CONTACT -->
+    <section id="contact" class="max-w-[1400px] mx-auto px-6 md:px-12 lg:px-20 py-24">
+        <div class="text-center mb-16">
+            <span class="inline-block border border-brand-cyan/30 bg-brand-cyan/10 rounded-full px-6 py-2 text-sm font-bold text-brand-cyan mb-4">احجز موعدك</span>
+            <h2 class="text-3xl md:text-5xl font-semibold text-brand-dark mb-6">احجز موعدك الأول <span class="text-brand-cyan">معنا الآن</span></h2>
+            <p class="text-gray-600 text-lg max-w-2xl mx-auto mb-12">أدخل بياناتك وسنتواصل معك في أسرع وقت لتقديم الرعاية اللازمة</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-8 mb-16">
+            <div class="bg-white p-8 rounded-[32px] border border-gray-100 shadow-sm hover:shadow-lg transition-all text-center">
+                <div class="w-14 h-14 bg-brand-cyan/10 rounded-full flex items-center justify-center mx-auto mb-4"><i class="fas fa-phone text-brand-cyan text-2xl"></i></div>
+                <h3 class="text-xl font-bold text-brand-dark mb-2">رقم الهاتف</h3>
+                <p class="text-gray-600" dir="ltr">+966 50 123 4567</p>
+            </div>
+            <div class="bg-white p-8 rounded-[32px] border border-gray-100 shadow-sm hover:shadow-lg transition-all text-center">
+                <div class="w-14 h-14 bg-brand-cyan/10 rounded-full flex items-center justify-center mx-auto mb-4"><i class="fas fa-map-marker-alt text-brand-cyan text-2xl"></i></div>
+                <h3 class="text-xl font-bold text-brand-dark mb-2">العنوان</h3>
+                <p class="text-gray-600">الرياض، المملكة العربية السعودية</p>
+            </div>
+            <div class="bg-white p-8 rounded-[32px] border border-gray-100 shadow-sm hover:shadow-lg transition-all text-center">
+                <div class="w-14 h-14 bg-brand-cyan/10 rounded-full flex items-center justify-center mx-auto mb-4"><i class="fas fa-clock text-brand-cyan text-2xl"></i></div>
+                <h3 class="text-xl font-bold text-brand-dark mb-2">ساعات العمل</h3>
+                <p class="text-gray-600">السبت - الخميس: 9 صباحاً - 9 مساءً</p>
+            </div>
+        </div>
+
+        <div class="bg-gradient-to-br from-brand-dark to-[#0f1419] rounded-[40px] p-8 md:p-16 text-white relative overflow-hidden">
+            <div class="absolute -top-32 -right-32 w-96 h-96 bg-brand-cyan/20 rounded-full blur-3xl pointer-events-none"></div>
+            <div class="absolute -bottom-32 -left-32 w-96 h-96 bg-brand-cyan/10 rounded-full blur-3xl pointer-events-none"></div>
+
+            <div class="relative z-10 max-w-2xl mx-auto">
+                <h3 class="text-2xl md:text-3xl font-bold mb-8 text-center">نموذج الحجز</h3>
+
+                <div class="flex justify-center gap-2 mb-8">
+                    <div class="w-10 h-10 rounded-full bg-brand-cyan text-white flex items-center justify-center font-bold text-sm" id="contactStep1Dot">١</div>
+                    <div class="flex-1 h-0.5 bg-gray-600 my-auto" id="contactLine1"></div>
+                    <div class="w-10 h-10 rounded-full bg-gray-600 text-white flex items-center justify-center font-bold text-sm" id="contactStep2Dot">٢</div>
+                    <div class="flex-1 h-0.5 bg-gray-600 my-auto" id="contactLine2"></div>
+                    <div class="w-10 h-10 rounded-full bg-gray-600 text-white flex items-center justify-center font-bold text-sm" id="contactStep3Dot">٣</div>
+                </div>
+
+                <!-- Step 1 -->
+                <div id="contactFormStep1" class="space-y-6">
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-300 mb-2">الاسم الكامل <span class="text-red-400">*</span></label>
+                        <input type="text" id="contactPatientName" class="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-3 text-white focus:outline-none focus:border-brand-cyan transition-colors" placeholder="أدخل اسمك الكامل">
+                        <span class="text-red-400 text-sm" id="contactErrName" style="display:none;">يرجى إدخال الاسم الكامل</span>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-300 mb-2">رقم الهاتف <span class="text-red-400">*</span></label>
+                        <input type="tel" id="contactPatientPhone" class="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-3 text-white focus:outline-none focus:border-brand-cyan transition-colors" placeholder="09xxxxxxxx" dir="ltr">
+                        <span class="text-red-400 text-sm" id="contactErrPhone" style="display:none;">يرجى إدخال رقم هاتف صحيح</span>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-300 mb-2">تاريخ الميلاد <span class="text-red-400">*</span></label>
+                        <input type="date" id="contactPatientBirth" class="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-3 text-white focus:outline-none focus:border-brand-cyan transition-colors">
+                        <span class="text-red-400 text-sm" id="contactErrBirth" style="display:none;">يرجى إدخال تاريخ الميلاد</span>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-gray-300 mb-2">نوع الزيارة <span class="text-red-400">*</span></label>
+                        <select id="contactVisitType" class="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-3 text-white focus:outline-none focus:border-brand-cyan transition-colors">
+                            <option value="" style="color:#333;">-- اختر نوع الزيارة --</option>
+                            <option value="كشف جديد" style="color:#333;">كشف جديد</option>
+                            <option value="مراجعة" style="color:#333;">مراجعة</option>
+                            <option value="تحاليل" style="color:#333;">تحاليل</option>
+                        </select>
+                        <span class="text-red-400 text-sm" id="contactErrType" style="display:none;">يرجى اختيار نوع الزيارة</span>
+                    </div>
+                    <button class="w-full bg-brand-cyan text-black font-bold py-3 rounded-xl hover:bg-[#3ca0a8] transition-colors" onclick="contactGoStep2()">
+                        التالي <i class="fas fa-arrow-left" style="margin-right: 8px;"></i>
+                    </button>
+                </div>
+
+                <!-- Step 2 -->
+                <div id="contactFormStep2" class="space-y-6" style="display:none;">
+                    <p class="text-gray-300 text-center">اختر التاريخ ثم الوقت المناسب</p>
+
+                    <div class="bg-white/5 border border-white/20 rounded-2xl p-4">
+                        <div class="flex justify-between items-center mb-4">
+                            <button class="w-10 h-10 rounded-lg border border-white/20 hover:bg-white/10 transition-colors" id="contactCalPrev" onclick="contactCalNav(-1)"><i class="fas fa-chevron-right"></i></button>
+                            <span class="font-bold text-lg" id="contactCalMonthLabel">—</span>
+                            <button class="w-10 h-10 rounded-lg border border-white/20 hover:bg-white/10 transition-colors" id="contactCalNext" onclick="contactCalNav(1)"><i class="fas fa-chevron-left"></i></button>
+                        </div>
+                        <div class="grid grid-cols-7 gap-2 text-center mb-2">
+                            <div class="text-xs font-bold text-gray-400">سبت</div>
+                            <div class="text-xs font-bold text-gray-400">جمعة</div>
+                            <div class="text-xs font-bold text-gray-400">خميس</div>
+                            <div class="text-xs font-bold text-gray-400">أربعاء</div>
+                            <div class="text-xs font-bold text-gray-400">ثلاثاء</div>
+                            <div class="text-xs font-bold text-gray-400">إثنين</div>
+                            <div class="text-xs font-bold text-gray-400">أحد</div>
+                        </div>
+                        <div class="grid grid-cols-7 gap-2" id="contactCalGrid"></div>
+                    </div>
+
+                    <div id="contactSelectedDateDisplay" style="display:none;" class="bg-brand-cyan/20 border border-brand-cyan rounded-xl p-4 text-center font-bold text-brand-cyan">
+                        <i class="fas fa-calendar-check" style="margin-left: 8px;"></i>
+                        <span id="contactSelectedDateText">—</span>
+                    </div>
+
+                    <span class="text-red-400 text-sm text-center block" id="contactErrDate" style="display:none;">يرجى اختيار تاريخ</span>
+
+                    <div id="contactTimeSlotContainer" style="display:none;">
+                        <label class="block text-sm font-semibold text-gray-300 mb-2">الوقت المناسب <span class="text-red-400">*</span></label>
+                        <select id="contactTimeSelect" class="w-full bg-white/10 border border-white/20 rounded-xl px-5 py-3 text-white focus:outline-none focus:border-brand-cyan transition-colors" style="color:white;">
+                            <option value="" style="color:#333;">-- اختر الوقت --</option>
+                        </select>
+                        <span class="text-red-400 text-sm" id="contactErrPeriod" style="display:none;">يرجى اختيار الوقت</span>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-6">
+                        <button class="bg-white/10 text-white font-bold py-3 rounded-xl hover:bg-white/20 transition-colors order-2 sm:order-1" onclick="contactFormGoStep(1)">
+                            <i class="fas fa-arrow-right" style="margin-left: 8px;"></i> رجوع
+                        </button>
+                        <button class="bg-brand-cyan text-black font-bold py-3 rounded-xl hover:bg-[#3ca0a8] transition-colors order-1 sm:order-2" onclick="contactFormGoStep3()">
+                            التالي <i class="fas fa-arrow-left" style="margin-right: 8px;"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Step 3 -->
+                <div id="contactFormStep3" class="space-y-6" style="display:none;">
+                    <div class="bg-white/10 border border-white/20 rounded-2xl p-6 space-y-4" id="contactSummaryBox"></div>
+                    <p class="text-gray-300 text-center text-sm">سيتم إرسال الطلب للممرضة وستتواصل معك بعد التأكيد</p>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <button class="bg-white/10 text-white font-bold py-3 rounded-xl hover:bg-white/20 transition-colors order-2 sm:order-1" onclick="contactFormGoStep(2)">
+                            <i class="fas fa-arrow-right" style="margin-left: 8px;"></i> رجوع
+                        </button>
+                        <button class="bg-brand-cyan text-black font-bold py-3 rounded-xl hover:bg-[#3ca0a8] transition-colors order-1 sm:order-2" id="contactSubmitBtn" onclick="contactFormSubmit()">
+                            <i class="fas fa-paper-plane" style="margin-right: 8px;"></i> إرسال الطلب
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Success -->
+                <div id="contactFormSuccess" class="text-center space-y-6" style="display:none;">
+                    <div class="w-20 h-20 bg-green-500/20 rounded-full flex items-center justify-center mx-auto">
+                        <i class="fas fa-check text-4xl text-green-400"></i>
+                    </div>
+                    <h3 class="text-2xl font-bold">تم إرسال طلبك بنجاح!</h3>
+                    <p class="text-gray-300">سيتم مراجعة طلبك من قبل مكتب الممرضة وتأكيده في أقرب وقت</p>
+                    <div class="bg-white/10 border border-white/20 rounded-2xl p-6 space-y-3 text-sm" id="contactSuccessSummary"></div>
+                    <button class="w-full bg-brand-cyan text-black font-bold py-3 rounded-xl hover:bg-[#3ca0a8] transition-colors" onclick="contactFormReset()">
+                        <i class="fas fa-plus" style="margin-right: 8px;"></i> حجز موعد جديد
+                    </button>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <footer class="text-center py-8 text-gray-500 text-sm border-t border-gray-100">
+        جميع الحقوق محفوظة &copy; 2024 دكتورا لطب الأسنان.
+    </footer>
+
+    <script>
+        // ──── Sidebar ────
+        function toggleSidebar() {
+            document.getElementById('mobile-sidebar').classList.toggle('active');
+            document.getElementById('sidebar-overlay').classList.toggle('active');
+        }
+        function closeSidebar() {
+            document.getElementById('mobile-sidebar').classList.remove('active');
+            document.getElementById('sidebar-overlay').classList.remove('active');
+        }
+        document.getElementById('sidebar-overlay').addEventListener('click', closeSidebar);
+
+        // ──── Header Scroll ────
+        window.addEventListener('scroll', function() {
+            document.getElementById('main-header').classList.toggle('header-scrolled', window.scrollY > 50);
+        });
+        window.addEventListener('resize', function() {
+            if (window.innerWidth > 1024) closeSidebar();
+        });
+
+        // ──── Shared ────
+        let TIME_SLOTS = (window._bookingSlots && window._bookingSlots.length)
+            ? window._bookingSlots.slice()
+            : ["08:00","08:30","09:00","09:30","10:00","10:30","11:00","11:30","13:00","13:30","14:00","14:30","15:00","15:30","16:00","16:30","17:00"];
+        const monthsAr = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+
+        const today = new Date(); today.setHours(0,0,0,0);
+        const todayStr = toISO(today);
+
+        function toISO(d) {
+            return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        }
+        function parseISO(s) {
+            const [y,m,d] = s.split('-').map(Number);
+            return new Date(y, m-1, d);
+        }
+        function formatAr(s) {
+            if (!s) return '-';
+            return parseISO(s).toLocaleDateString('ar-EG', {weekday:'long', year:'numeric', month:'long', day:'numeric'});
+        }
+        function getClosedDays() { return window._closedDaysCache || []; }
+        function getWeeklyOff() { return window._bookingWeeklyOff || []; }
+        // يوم مغلق = ضمن الأيام المغلقة المحددة أو ضمن العطل الأسبوعية الثابتة (من إعداد الممرضة)
+        // أو خارج نافذة الحجز (٦٠ يوماً): بياناتُ حجزه غير محمَّلة، فلو سُمح به لبدا
+        // فارغاً دائماً وأمكن حجز الوقت نفسه مرّتين. الإغلاق هنا شرط سلامة لا تجميل.
+        function isDayClosed(dateStr) {
+            if (window._bookedSlotsWindowEnd && dateStr > window._bookedSlotsWindowEnd) return true;
+            if (getClosedDays().includes(dateStr)) return true;
+            const off = getWeeklyOff();
+            if (off.length) { try { if (off.indexOf(parseISO(dateStr).getDay()) !== -1) return true; } catch (e) {} }
+            return false;
+        }
+        // يُستدعى عند وصول/تحديث إعدادات الحجز من Firestore (أوقات جديدة من الممرضة تظهر فوراً)
+        function applyBookingConfig() {
+            if (window._bookingSlots && window._bookingSlots.length) TIME_SLOTS = window._bookingSlots.slice();
+            if (typeof bookingRenderCalendar === 'function' &&
+                document.getElementById('bookingStep2') &&
+                document.getElementById('bookingStep2').style.display !== 'none') bookingRenderCalendar();
+            if (typeof contactRenderCalendar === 'function' &&
+                document.getElementById('contactFormStep2') &&
+                document.getElementById('contactFormStep2').style.display !== 'none') contactRenderCalendar();
+        }
+        window.applyBookingConfig = applyBookingConfig;
+
+        // مُعرّف القفل موحّد مع الممرضة (تاريخ مطبَّع + وقت بلا نقطتين)
+        function slotLockId(dateStr, time) {
+            var s = (dateStr + '').trim().substring(0, 10);
+            var p = s.split('-').map(Number);
+            if (p[0] && p[1] && p[2]) s = p[0] + '-' + String(p[1]).padStart(2, '0') + '-' + String(p[2]).padStart(2, '0');
+            return s + '_' + String(time).replace(':', '');
+        }
+        // الأوقات المحجوزة ليوم معيّن
+        function takenTimesForDate(dateStr) {
+            const taken = {};
+            const bs = window._bookedSlots || {};
+            Object.keys(bs).forEach(function(id) {
+                if (bs[id] && bs[id].date === dateStr && bs[id].time) taken[bs[id].time] = true;
+            });
+            return taken;
+        }
+
+        // تعبئة قائمة الأوقات مع تعطيل المحجوز ليوم محدّد + إغلاق ساعات اليوم الماضية
+        function fillTimeSelect(selectEl, dateStr) {
+            const taken = dateStr ? takenTimesForDate(dateStr) : {};
+            // التوقيت المحلّي الحالي: نُغلق ساعات اليوم التي مضت
+            const _now = new Date();
+            const _todayStr = _now.getFullYear() + '-' + String(_now.getMonth()+1).padStart(2,'0') + '-' + String(_now.getDate()).padStart(2,'0');
+            const isToday = dateStr === _todayStr;
+            const nowHM = String(_now.getHours()).padStart(2,'0') + ':' + String(_now.getMinutes()).padStart(2,'0');
+            selectEl.innerHTML = '<option value="">-- اختر الوقت --</option>';
+            TIME_SLOTS.forEach(slot => {
+                if (isToday && slot <= nowHM) return;   // ساعة ماضية لهذا اليوم → لا تُعرض
+                const opt = document.createElement('option');
+                opt.value = slot;
+                opt.textContent = taken[slot] ? (slot + ' — محجوز') : slot;
+                opt.disabled = !!taken[slot];
+                opt.style.color = '#333';
+                selectEl.appendChild(opt);
+            });
+        }
+
+        // ──── BOOKING MODAL ────
+        let bookingState = { name:'', phone:'', birth:'', visitType:'', period:'', date:'' };
+        let bookingSelectedDate = '';
+        let bookingCalDate = new Date(today);
+
+        function openBookingModal() {
+            document.getElementById('bookingModalOverlay').classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+        function closeBookingModal() {
+            document.getElementById('bookingModalOverlay').classList.remove('active');
+            document.body.style.overflow = 'auto';
+        }
+        document.getElementById('bookingModalOverlay').addEventListener('click', function(e) {
+            if (e.target === this) closeBookingModal();
+        });
+
+        function bookingShowStep(n) {
+            [1,2,3,'Success'].forEach(s => {
+                const el = document.getElementById('bookingStep' + s);
+                if (el) el.style.display = 'none';
+            });
+            document.getElementById('bookingStep' + n).style.display = 'block';
+
+            if (n !== 'Success') {
+                [1,2,3].forEach(i => {
+                    const dot  = document.getElementById('bookingDot' + i);
+                    const line = document.getElementById('bookingLine' + i);
+                    if (i < n)        { dot.className = 'booking-step-dot done'; dot.innerHTML = '<i class="fas fa-check" style="font-size:.65rem;"></i>'; }
+                    else if (i === n) { dot.className = 'booking-step-dot active'; dot.textContent = ['١','٢','٣'][i-1]; }
+                    else              { dot.className = 'booking-step-dot'; dot.textContent = ['١','٢','٣'][i-1]; }
+                    if (line) line.className = i < n ? 'booking-step-line done' : 'booking-step-line';
+                });
+                document.getElementById('bookingStepsBar').style.display = 'flex';
+            } else {
+                document.getElementById('bookingStepsBar').style.display = 'none';
+            }
+        }
+
+        function bookingGoStep(n) { bookingShowStep(n); }
+
+        function bookingToggle(errId, show, inputId) {
+            document.getElementById(errId).style.display = show ? 'block' : 'none';
+            const input = document.getElementById(inputId);
+            if (input) input.classList.toggle('invalid', show);
+        }
+
+        function bookingGoStep2() {
+            const name  = document.getElementById('bookingPatientName').value.trim();
+            const phone = document.getElementById('bookingPatientPhone').value.trim();
+            const birth = document.getElementById('bookingPatientBirth').value;
+            const type  = document.getElementById('bookingVisitType').value;
+
+            bookingToggle('bookingErrName',  !name,            'bookingPatientName');
+            bookingToggle('bookingErrPhone', phone.length < 7, 'bookingPatientPhone');
+            bookingToggle('bookingErrBirth', !birth,           'bookingPatientBirth');
+            bookingToggle('bookingErrType',  !type,            'bookingVisitType');
+
+            if (!name || phone.length < 7 || !birth || !type) return;
+
+            bookingState.name      = name;
+            bookingState.phone     = phone;
+            bookingState.birth     = birth;
+            bookingState.visitType = type;
+
+            bookingShowStep(2);
+            bookingRenderCalendar();
+        }
+
+        function bookingCalNav(dir) {
+            bookingCalDate.setMonth(bookingCalDate.getMonth() + dir);
+            bookingRenderCalendar();
+        }
+
+        function bookingRenderCalendar() {
+            const closedDays = getClosedDays();
+            const maxDate    = new Date(today); maxDate.setMonth(maxDate.getMonth() + 3);
+            const y = bookingCalDate.getFullYear(), m = bookingCalDate.getMonth();
+            document.getElementById('bookingCalMonthLabel').textContent = `${monthsAr[m]} ${y}`;
+
+            const prevStart = new Date(y, m, 1);
+            document.getElementById('bookingCalPrev').disabled = prevStart <= today;
+
+            const firstDay = new Date(y, m, 1);
+            const lastDay  = new Date(y, m+1, 0);
+            const offset   = (6 - firstDay.getDay() + 7) % 7;
+
+            const grid = document.getElementById('bookingCalGrid');
+            grid.innerHTML = '';
+
+            for (let i = 0; i < offset; i++) grid.appendChild(document.createElement('div'));
+
+            for (let d = 1; d <= lastDay.getDate(); d++) {
+                const dateObj = new Date(y, m, d);
+                const dateStr = toISO(dateObj);
+                const btn = document.createElement('button');
+                btn.textContent = d;
+                btn.className = 'booking-cal-day';
+
+                if (dateStr === todayStr)            btn.classList.add('today');
+                if (dateStr === bookingSelectedDate) btn.classList.add('selected');
+
+                if (dateObj < today || dateObj > maxDate) {
+                    btn.classList.add('disabled');
+                } else if (isDayClosed(dateStr)) {
+                    btn.classList.add('closed');
+                } else {
+                    btn.onclick = () => bookingPickDay(dateStr, btn);
+                }
+                grid.appendChild(btn);
+            }
+        }
+
+        function bookingPickDay(dateStr, btn) {
+            bookingSelectedDate = dateStr;
+            bookingState.date = dateStr;
+
+            document.querySelectorAll('.booking-cal-day.selected').forEach(el => el.classList.remove('selected'));
+            btn.classList.add('selected');
+
+            document.getElementById('bookingClosedBanner').style.display = 'none';
+
+            const display = document.getElementById('bookingSelectedDateDisplay');
+            document.getElementById('bookingSelectedDateText').textContent = formatAr(dateStr);
+            display.style.display = 'block';
+
+            document.getElementById('bookingErrDate').style.display = 'none';
+
+            const container = document.getElementById('bookingTimeSlotContainer');
+            fillTimeSelect(document.getElementById('bookingTimeSelect'), dateStr);
+            document.getElementById('bookingErrPeriod').style.display = 'none';
+            container.style.display = 'block';
+        }
+
+        function bookingGoStep3() {
+            if (!bookingSelectedDate) {
+                document.getElementById('bookingErrDate').style.display = 'block';
+                return;
+            }
+            const timeVal = document.getElementById('bookingTimeSelect').value;
+            if (!timeVal) {
+                document.getElementById('bookingErrPeriod').style.display = 'block';
+                return;
+            }
+            document.getElementById('bookingErrPeriod').style.display = 'none';
+
+            bookingState.period = timeVal;
+            bookingState.date   = bookingSelectedDate;
+
+            const rows = [
+                { label: 'الاسم',         value: bookingState.name },
+                { label: 'الهاتف',        value: bookingState.phone },
+                { label: 'تاريخ الميلاد', value: formatAr(bookingState.birth) },
+                { label: 'نوع الزيارة',   value: bookingState.visitType },
+                { label: 'التاريخ',       value: formatAr(bookingState.date) },
+                { label: 'الوقت',         value: bookingState.period },
+            ];
+            document.getElementById('bookingSummaryBox').innerHTML = rows.map(r => `
+                <div class="booking-summary-row">
+                    <span class="label">${r.label}</span>
+                    <span class="value">${r.value}</span>
+                </div>`).join('');
+
+            bookingShowStep(3);
+        }
+
+        function bookingSubmitBooking() {
+            const btn = document.getElementById('bookingSubmitBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> جارٍ الإرسال...';
+
+            const appt = {
+                id:          'appt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+                PatientName: bookingState.name,
+                Phone:       bookingState.phone,
+                BirthDate:   bookingState.birth,
+                Address:     '',
+                VisitType:   bookingState.visitType,
+                Date:        bookingState.date,
+                Slot:        bookingState.period,
+                Status:      'Pending',
+                source:      'online',
+                createdAt:   Date.now()
+            };
+
+            function _doSave() {
+                // قفل الوقت أولاً (لمنع الحجز المزدوج) ثم إنشاء الموعد
+                const lockId = slotLockId(appt.Date, appt.Slot);
+                window._fb.setDoc(window._fb.docRef('bookedSlots', lockId),
+                    { date: appt.Date, time: appt.Slot, apptId: appt.id, status: 'booked', createdAt: window._fb.serverTimestamp() })
+                .then(function() {
+                    return window._fb.addDoc(window._fb.col('appointments'), appt);
+                })
+                .then(function() {
+                    try { new BroadcastChannel('clinicSync').postMessage({ key: 'appointments' }); } catch(e) {}
+                    document.getElementById('bookingSuccessSummary').innerHTML = `
+                        <div class="booking-summary-row"><span class="label">الاسم</span><span class="value">${bookingState.name}</span></div>
+                        <div class="booking-summary-row"><span class="label">نوع الزيارة</span><span class="value">${bookingState.visitType}</span></div>
+                        <div class="booking-summary-row"><span class="label">التاريخ</span><span class="value">${formatAr(bookingState.date)}</span></div>
+                        <div class="booking-summary-row"><span class="label">الوقت</span><span class="value">${bookingState.period}</span></div>
+                    `;
+                    bookingShowStep('Success');
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-paper-plane"></i> إرسال الطلب';
+                }).catch(function(e) {
+                    console.error('[booking]', e);
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-paper-plane"></i> إرسال الطلب';
+                    alert('تعذّر إرسال الطلب، قد يكون الوقت محجوزاً. حاول وقتاً آخر.');
+                });
+            }
+            if (window._fbReady) _doSave();
+            else window.addEventListener('fbReady', _doSave, { once: true });
+        }
+
+        function bookingResetForm() {
+            bookingState = { name:'', phone:'', birth:'', visitType:'', period:'', date:'' };
+            bookingSelectedDate = '';
+            bookingCalDate = new Date(today);
+            document.getElementById('bookingPatientName').value  = '';
+            document.getElementById('bookingPatientPhone').value = '';
+            document.getElementById('bookingPatientBirth').value = '';
+            document.getElementById('bookingVisitType').value    = '';
+            document.getElementById('bookingTimeSelect').value   = '';
+            document.getElementById('bookingTimeSlotContainer').style.display = 'none';
+            document.getElementById('bookingSelectedDateDisplay').style.display = 'none';
+            bookingShowStep(1);
+        }
+
+        bookingShowStep(1);
+
+        // ──── CONTACT FORM ────
+        let contactState = { name:'', phone:'', birth:'', visitType:'', period:'', date:'' };
+        let contactSelectedDate = '';
+        let contactCalDate = new Date(today);
+
+        function contactFormGoStep(n) { contactShowStep(n); }
+
+        function contactShowStep(n) {
+            ['contactFormStep1','contactFormStep2','contactFormStep3','contactFormSuccess'].forEach(id => {
+                document.getElementById(id).style.display =
+                    (id === `contactFormStep${n}` || (n === 'Success' && id === 'contactFormSuccess')) ? 'block' : 'none';
+            });
+
+            if (n !== 'Success') {
+                [1,2,3].forEach(i => {
+                    const dot  = document.getElementById(`contactStep${i}Dot`);
+                    const line = document.getElementById(`contactLine${i}`);
+                    if (i < n)        { dot.className = 'w-10 h-10 rounded-full bg-brand-cyan text-white flex items-center justify-center font-bold text-sm'; dot.innerHTML = '<i class="fas fa-check" style="font-size:.65rem;"></i>'; }
+                    else if (i === n) { dot.className = 'w-10 h-10 rounded-full bg-brand-cyan text-white flex items-center justify-center font-bold text-sm'; dot.textContent = ['١','٢','٣'][i-1]; }
+                    else              { dot.className = 'w-10 h-10 rounded-full bg-gray-600 text-white flex items-center justify-center font-bold text-sm'; dot.textContent = ['١','٢','٣'][i-1]; }
+                    if (line) line.className = i < n ? 'flex-1 h-0.5 bg-brand-cyan my-auto' : 'flex-1 h-0.5 bg-gray-600 my-auto';
+                });
+                document.querySelector('.flex.justify-center.gap-2').style.display = 'flex';
+            } else {
+                document.querySelector('.flex.justify-center.gap-2').style.display = 'none';
+            }
+        }
+
+        function contactToggle(errId, show, inputId) {
+            document.getElementById(errId).style.display = show ? 'block' : 'none';
+            const input = document.getElementById(inputId);
+            if (input) input.classList.toggle('invalid', show);
+        }
+
+        function contactGoStep2() {
+            const name  = document.getElementById('contactPatientName').value.trim();
+            const phone = document.getElementById('contactPatientPhone').value.trim();
+            const birth = document.getElementById('contactPatientBirth').value;
+            const type  = document.getElementById('contactVisitType').value;
+
+            contactToggle('contactErrName',  !name,            'contactPatientName');
+            contactToggle('contactErrPhone', phone.length < 7, 'contactPatientPhone');
+            contactToggle('contactErrBirth', !birth,           'contactPatientBirth');
+            contactToggle('contactErrType',  !type,            'contactVisitType');
+
+            if (!name || phone.length < 7 || !birth || !type) return;
+
+            contactState.name      = name;
+            contactState.phone     = phone;
+            contactState.birth     = birth;
+            contactState.visitType = type;
+
+            contactShowStep(2);
+            contactRenderCalendar();
+        }
+
+        function contactCalNav(dir) {
+            contactCalDate.setMonth(contactCalDate.getMonth() + dir);
+            contactRenderCalendar();
+        }
+
+        function contactRenderCalendar() {
+            const closedDays = getClosedDays();
+            const maxDate    = new Date(today); maxDate.setMonth(maxDate.getMonth() + 3);
+            const y = contactCalDate.getFullYear(), m = contactCalDate.getMonth();
+            document.getElementById('contactCalMonthLabel').textContent = `${monthsAr[m]} ${y}`;
+
+            const prevStart = new Date(y, m, 1);
+            document.getElementById('contactCalPrev').disabled = prevStart <= today;
+
+            const firstDay = new Date(y, m, 1);
+            const lastDay  = new Date(y, m+1, 0);
+            const offset   = (6 - firstDay.getDay() + 7) % 7;
+
+            const grid = document.getElementById('contactCalGrid');
+            grid.innerHTML = '';
+
+            for (let i = 0; i < offset; i++) grid.appendChild(document.createElement('div'));
+
+            for (let d = 1; d <= lastDay.getDate(); d++) {
+                const dateObj = new Date(y, m, d);
+                const dateStr = toISO(dateObj);
+                const btn = document.createElement('button');
+                btn.textContent = d;
+                btn.className = 'w-10 h-10 rounded-lg border border-white/20 hover:bg-white/10 transition-colors text-white text-sm';
+
+                if (dateStr === todayStr)             btn.classList.add('bg-brand-cyan/30');
+                if (dateStr === contactSelectedDate)  btn.classList.add('bg-brand-cyan', 'border-brand-cyan');
+
+                if (dateObj < today || dateObj > maxDate) {
+                    btn.classList.add('opacity-30', 'cursor-not-allowed'); btn.disabled = true;
+                } else if (isDayClosed(dateStr)) {
+                    btn.classList.add('opacity-30', 'cursor-not-allowed'); btn.disabled = true;
+                } else {
+                    btn.onclick = () => contactPickDay(dateStr, btn);
+                }
+                grid.appendChild(btn);
+            }
+        }
+
+        function contactPickDay(dateStr, btn) {
+            contactSelectedDate = dateStr;
+            contactState.date = dateStr;
+
+            document.querySelectorAll('#contactCalGrid button.bg-brand-cyan').forEach(el => {
+                el.classList.remove('bg-brand-cyan', 'border-brand-cyan');
+                el.classList.add('border-white/20');
+            });
+            btn.classList.add('bg-brand-cyan', 'border-brand-cyan');
+
+            document.getElementById('contactSelectedDateText').textContent = formatAr(dateStr);
+            document.getElementById('contactSelectedDateDisplay').style.display = 'block';
+            document.getElementById('contactErrDate').style.display = 'none';
+
+            fillTimeSelect(document.getElementById('contactTimeSelect'), dateStr);
+            document.getElementById('contactErrPeriod').style.display = 'none';
+            document.getElementById('contactTimeSlotContainer').style.display = 'block';
+        }
+
+        function contactFormGoStep3() {
+            if (!contactSelectedDate) {
+                document.getElementById('contactErrDate').style.display = 'block';
+                return;
+            }
+            const timeVal = document.getElementById('contactTimeSelect').value;
+            if (!timeVal) {
+                document.getElementById('contactErrPeriod').style.display = 'block';
+                return;
+            }
+            document.getElementById('contactErrPeriod').style.display = 'none';
+
+            contactState.period = timeVal;
+            contactState.date   = contactSelectedDate;
+
+            const rows = [
+                { label: 'الاسم',         value: contactState.name },
+                { label: 'الهاتف',        value: contactState.phone },
+                { label: 'تاريخ الميلاد', value: formatAr(contactState.birth) },
+                { label: 'نوع الزيارة',   value: contactState.visitType },
+                { label: 'التاريخ',       value: formatAr(contactState.date) },
+                { label: 'الوقت',         value: contactState.period },
+            ];
+            document.getElementById('contactSummaryBox').innerHTML = rows.map(r => `
+                <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.1);">
+                    <span style="color:#999;">${r.label}</span>
+                    <span style="font-weight:bold;">${r.value}</span>
+                </div>`).join('');
+
+            contactShowStep(3);
+        }
+
+        function contactFormSubmit() {
+            const btn = document.getElementById('contactSubmitBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> جارٍ الإرسال...';
+
+            const appt = {
+                id:          'appt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+                PatientName: contactState.name,
+                Phone:       contactState.phone,
+                BirthDate:   contactState.birth,
+                Address:     '',
+                VisitType:   contactState.visitType,
+                Date:        contactState.date,
+                Slot:        contactState.period,
+                Status:      'Pending',
+                source:      'online',
+                createdAt:   Date.now()
+            };
+
+            function _doContactSave() {
+                const lockId = slotLockId(appt.Date, appt.Slot);
+                window._fb.setDoc(window._fb.docRef('bookedSlots', lockId),
+                    { date: appt.Date, time: appt.Slot, apptId: appt.id, status: 'booked', createdAt: window._fb.serverTimestamp() })
+                .then(function() {
+                    return window._fb.addDoc(window._fb.col('appointments'), appt);
+                })
+                .then(function() {
+                    try { new BroadcastChannel('clinicSync').postMessage({ key: 'appointments' }); } catch(e) {}
+                    document.getElementById('contactSuccessSummary').innerHTML = `
+                        <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.1);"><span style="color:#999;">الاسم</span><span style="font-weight:bold;">${contactState.name}</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.1);"><span style="color:#999;">نوع الزيارة</span><span style="font-weight:bold;">${contactState.visitType}</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.1);"><span style="color:#999;">التاريخ</span><span style="font-weight:bold;">${formatAr(contactState.date)}</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:8px 0;"><span style="color:#999;">الوقت</span><span style="font-weight:bold;">${contactState.period}</span></div>
+                    `;
+                    contactShowStep('Success');
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-paper-plane"></i> إرسال الطلب';
+                }).catch(function(e) {
+                    console.error('[contact]', e);
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-paper-plane"></i> إرسال الطلب';
+                    alert('تعذّر إرسال الطلب، قد يكون الوقت محجوزاً. حاول وقتاً آخر.');
+                });
+            }
+            if (window._fbReady) _doContactSave();
+            else window.addEventListener('fbReady', _doContactSave, { once: true });
+        }
+
+        function contactFormReset() {
+            contactState = { name:'', phone:'', birth:'', visitType:'', period:'', date:'' };
+            contactSelectedDate = '';
+            contactCalDate = new Date(today);
+            document.getElementById('contactPatientName').value  = '';
+            document.getElementById('contactPatientPhone').value = '';
+            document.getElementById('contactPatientBirth').value = '';
+            document.getElementById('contactVisitType').value    = '';
+            document.getElementById('contactTimeSelect').value   = '';
+            document.getElementById('contactTimeSlotContainer').style.display = 'none';
+            document.getElementById('contactSelectedDateDisplay').style.display = 'none';
+            contactShowStep(1);
+        }
+
+        contactShowStep(1);
+    </script>
+</body>
+</html>
