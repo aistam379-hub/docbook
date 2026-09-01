@@ -153,6 +153,37 @@
         background: var(--red, #dc2626); border: 2px solid var(--surface);
         clip: auto; overflow: visible;
       }
+      /* شارة عدد (رقم) بدل النقطة */
+      .menu-item > .rail-badge--count {
+        top: -3px; inset-inline-end: -3px;
+        width: auto; min-width: 16px; height: 16px; padding: 0 4px;
+        border-radius: 8px; border: 2px solid var(--surface);
+        background: var(--primary); color: #fff;
+        font-size: .62rem; font-weight: 800; line-height: 1;
+        display: flex; align-items: center; justify-content: center;
+        font-variant-numeric: tabular-nums;
+      }
+      /* قائمة «مواعيد اليوم» المنبثقة جنب الشريط */
+      .today-flyout {
+        position: absolute; inset-inline-start: calc(100% + 12px); top: 0;
+        width: 300px; max-height: 72vh;
+        display: flex; flex-direction: column; overflow: hidden;
+        background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+        box-shadow: var(--shadow-lg); z-index: var(--z-dropdown, 300);
+        animation: tbMenuIn .12s ease;
+      }
+      .today-flyout[hidden] { display: none; }
+      .today-flyout-head {
+        flex-shrink: 0; padding: 12px 14px; border-bottom: 1px solid var(--border);
+        font-weight: 800; font-size: .85rem; color: var(--text);
+        display: flex; align-items: center; gap: 7px;
+      }
+      .today-flyout-head i { color: var(--primary); }
+      .today-flyout-count { color: var(--text-muted); font-weight: 700; font-size: .76rem; }
+      .today-flyout-list {
+        overflow-y: auto; overscroll-behavior: contain;
+        padding: 10px; display: flex; flex-direction: column; gap: 7px;
+      }
       /* tooltip بجانب الأيقونة (جهة المحتوى = اليسار في RTL) */
       .menu-item[aria-label]::after {
         content: attr(aria-label);

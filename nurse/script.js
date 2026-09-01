@@ -2782,27 +2782,59 @@
       if (r) sendWhatsAppReminder(r, btn);
     };
     function renderTodayReminders() {
-      const box = document.getElementById('todayRemindersList'); if (!box) return;
+      const box  = document.getElementById('todayRemindersList');
+      const fly  = document.getElementById('todayFlyoutList');
       const recs = (allRecords || []).filter(function(r) {
         return (r.Status === 'Accepted' || r.Status === 'InProgress') && normalizeDate(r.Date) === todayStr;
       }).sort(function(a,b){ return slotMinutes(slotTimeOf(a)) - slotMinutes(slotTimeOf(b)); });
+
+      // شارة العدّ + عدّاد القائمة المنبثقة في الشريط الجانبي
+      var badge = document.getElementById('todayRailBadge');
+      if (badge) { badge.textContent = recs.length; badge.style.display = recs.length ? 'flex' : 'none'; }
+      var fcount = document.getElementById('todayFlyoutCount');
+      if (fcount) fcount.textContent = recs.length ? '(' + recs.length + ')' : '';
+
+      var html;
       if (!recs.length) {
-        box.innerHTML = '<p style="text-align:center; color:var(--text-muted); font-size:.8rem; padding:10px;">لا مواعيد اليوم</p>';
-        return;
+        html = '<p style="text-align:center; color:var(--text-muted); font-size:.8rem; padding:10px;">لا مواعيد اليوم</p>';
+      } else {
+        html = recs.map(function(r) {
+          const sent = isReminderSent(r.id);
+          const right = sent
+            ? '<span style="display:inline-flex; align-items:center; gap:5px; color:#16a34a; font-weight:800; font-size:.78rem; white-space:nowrap;"><i class="fas fa-check-circle"></i> تم إرسال التذكير</span>'
+            : '<button onclick="remindById(\'' + r.id + '\',this)" style="display:inline-flex; align-items:center; gap:6px; background:#25D366; color:#fff; border:none; border-radius:9px; padding:7px 13px; font-weight:700; font-size:.78rem; font-family:inherit; cursor:pointer; white-space:nowrap;"><i class="fab fa-whatsapp"></i> تذكير</button>';
+          return '<div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--surface);">'
+            + '<div style="display:flex; align-items:center; gap:11px; min-width:0;">'
+              + '<span style="font-family:\'DM Mono\',monospace; font-weight:800; color:var(--primary); font-size:.84rem;">' + slotLabelOf(r) + '</span>'
+              + '<div style="min-width:0;"><p style="font-weight:700; font-size:.84rem; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + escapeHtml(r.PatientName || '') + '</p>'
+              + '<p style="font-size:.7rem; color:var(--text-muted);">' + escapeHtml(r.VisitType || '') + '</p></div>'
+            + '</div>' + right + '</div>';
+        }).join('');
       }
-      box.innerHTML = recs.map(function(r) {
-        const sent = isReminderSent(r.id);
-        const right = sent
-          ? '<span style="display:inline-flex; align-items:center; gap:5px; color:#16a34a; font-weight:800; font-size:.78rem; white-space:nowrap;"><i class="fas fa-check-circle"></i> تم إرسال التذكير</span>'
-          : '<button onclick="remindById(\'' + r.id + '\',this)" style="display:inline-flex; align-items:center; gap:6px; background:#25D366; color:#fff; border:none; border-radius:9px; padding:7px 13px; font-weight:700; font-size:.78rem; font-family:inherit; cursor:pointer; white-space:nowrap;"><i class="fab fa-whatsapp"></i> تذكير</button>';
-        return '<div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--surface);">'
-          + '<div style="display:flex; align-items:center; gap:11px; min-width:0;">'
-            + '<span style="font-family:\'DM Mono\',monospace; font-weight:800; color:var(--primary); font-size:.84rem;">' + slotLabelOf(r) + '</span>'
-            + '<div style="min-width:0;"><p style="font-weight:700; font-size:.84rem; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + escapeHtml(r.PatientName || '') + '</p>'
-            + '<p style="font-size:.7rem; color:var(--text-muted);">' + escapeHtml(r.VisitType || '') + '</p></div>'
-          + '</div>' + right + '</div>';
-      }).join('');
+      if (box) box.innerHTML = html;
+      if (fly) fly.innerHTML = html;
     }
+
+    // ===== قائمة «مواعيد اليوم» المنبثقة من الشريط الجانبي =====
+    window.closeTodayFlyout = function() {
+      var f = document.getElementById('todayFlyout'), b = document.getElementById('sidebarTodayBtn');
+      if (f) f.hidden = true;
+      if (b) b.setAttribute('aria-expanded', 'false');
+    };
+    window.toggleTodayFlyout = function() {
+      var f = document.getElementById('todayFlyout'), b = document.getElementById('sidebarTodayBtn');
+      if (!f) return;
+      var willOpen = f.hidden;
+      f.hidden = !willOpen;
+      if (b) b.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+      if (willOpen && typeof renderTodayReminders === 'function') renderTodayReminders();
+    };
+    document.addEventListener('click', function(e) {
+      var li = document.getElementById('sidebarTodayBtn');
+      li = li && li.closest('li');
+      if (li && !li.contains(e.target)) window.closeTodayFlyout();
+    });
+    document.addEventListener('keydown', function(e) { if (e.key === 'Escape') window.closeTodayFlyout(); });
 
     // ===== بحث المريض في الشريط الجانبي =====
     window.renderCalPatientSearch = function() {
