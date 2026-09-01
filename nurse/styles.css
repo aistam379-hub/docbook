@@ -1325,13 +1325,27 @@
     }
     .appt-tab.active .appt-badge{ background:rgba(13,148,136,.15); color:var(--primary); }
     @media (max-width:767px){
-      /* الموبايل: النوتش يلاصق أسفل الهيدر الأبيض (padding الجسم 14px) */
-      .appt-notch{ margin-top:-14px; }
+      /* النوتش نمط لابتوب (يتدلّى من حافّة لوحة نظيفة). على الموبايل ما في حافّة
+         نظيفة (هيدر مزدحم) — فنرجع لمبدّل حبّة بسيط مسطّح. */
+      .appt-notch{
+        margin: 10px auto 14px; max-width: 100%;
+        padding: 3px; gap: 2px;
+        background: var(--bg); border: 1px solid var(--border);
+        border-radius: 99px; box-shadow: none; color: inherit;
+      }
+      .appt-notch::before, .appt-notch::after { display: none; }
+      .appt-tab{
+        flex: 1; justify-content: center; gap: 5px; white-space: nowrap;
+        padding: 8px 10px; border-radius: 99px;
+        background: transparent; color: var(--text-muted); font-size: .8rem;
+      }
+      .appt-tab svg{ display: none; }
+      .appt-tab.active{ background: var(--primary); color: #fff; box-shadow: 0 2px 8px rgba(13,148,136,.3); }
+      .appt-badge{ min-width: 16px; height: 16px; font-size: .64rem; background: var(--o10); color: var(--text-muted); }
+      .appt-tab.active .appt-badge{ background: rgba(255,255,255,.25); color: #fff; }
     }
     @media (max-width:560px){
-      .appt-notch{ max-width:calc(100% - 28px); padding:7px 12px; gap:6px; }
-      .appt-tab{ padding:7px 10px; font-size:.74rem; }
-      .appt-tab svg{ display:none; }
+      .appt-tab{ padding: 7px 6px; font-size: .74rem; }
     }
 
     #appointmentsDualView {
