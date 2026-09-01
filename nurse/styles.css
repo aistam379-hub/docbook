@@ -2494,6 +2494,20 @@
       #oDesktopGrid { display: contents; }
       .o-step-col { display: contents; }
       .o-step-col-title { display: none; }
+      /* مؤشّر الخطوات على الهاتف: بلا دوائر وبلا أرقام — عناوين فقط،
+         الخطوة الحاليّة بشريط تركوازيّ على الحافّة */
+      .form-step-indicator { gap: 6px; }
+      .step-dot { display: none; }
+      .step-dot-wrapper {
+        gap: 0;
+        padding: 7px 12px 7px 0;
+        border-inline-start: 3px solid transparent;
+        padding-inline-start: 12px;
+      }
+      .step-dot-wrapper.active { border-inline-start-color: var(--primary); }
+      .step-dot-label { font-size: .84rem; color: var(--text-muted); white-space: normal; }
+      .step-dot-wrapper.active .step-dot-label { color: var(--primary); }
+      .step-dot-wrapper.completed .step-dot-label { color: var(--text); }
     }
     #manualFormOverlayCloseBtn {
       position: absolute;
