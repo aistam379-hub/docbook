@@ -5335,6 +5335,18 @@ if('serviceWorker'in navigator){window.addEventListener('load',function(){naviga
         visit: [
           { label: 'تاريخ آخر طمث (LMP)', type: 'date', role: 'lmp' },
           { label: 'موعد الولادة المتوقع (EDD)', type: 'date' },
+          { label: 'عمر الحمل (أسابيع)', type: 'number' },
+          { label: 'الوزن (كغ)', type: 'number', role: 'weight' },
+          { label: 'ضغط الدم (mmHg)', type: 'text', role: 'bp' },
+          { label: 'ارتفاع قاع الرحم (سم)', type: 'number' },
+          { label: 'نبض الجنين (bpm)', type: 'number' },
+          { label: 'المجيء / وضعيّة الجنين', type: 'select', options: ['رأسي', 'مقعدي', 'معترض', 'غير محدَّد'] },
+          { label: 'حركة الجنين', type: 'select', options: ['جيّدة', 'قليلة', 'غير محسوسة'] },
+          { label: 'الوذمة', type: 'select', options: ['لا', 'خفيفة', 'واضحة'] },
+          { label: 'البول بالشريط (سكر / زلال)', type: 'text' },
+          { label: 'تحاليل الحمل (خضاب / سكر صيامي / تحدّي 50غ / زمرة)', type: 'textarea' },
+          { label: 'السونار (عدد الأجنّة / المشيمة / السائل / تقدير الوزن)', type: 'textarea' },
+          { label: 'اللقاح الكزازي (الجرعة / التاريخ)', type: 'text' },
           { label: 'نتائج فحص عنق الرحم (Pap Smear)', type: 'textarea' },
           { label: 'الفحص بالصدى (Echo)', type: 'textarea' }
         ]
@@ -5352,10 +5364,17 @@ if('serviceWorker'in navigator){window.addEventListener('load',function(){naviga
           { label: 'رقم هاتف ولي الأمر', type: 'text' }
         ],
         visit: [
+          { label: 'الحرارة (°م)', type: 'number' },
+          { label: 'النبض (نبضة/دقيقة)', type: 'number' },
+          { label: 'معدّل التنفّس (نفس/دقيقة)', type: 'number' },
+          { label: 'إشباع الأكسجين SpO₂ (%)', type: 'number' },
           { label: 'التطور الروحي الحركي', type: 'textarea' },
           { label: 'الوزن الحالي (كغ)', type: 'number', role: 'weight' },
           { label: 'الطول الحالي (سم)', type: 'number', role: 'height' },
-          { label: 'محيط الرأس (سم)', type: 'number', role: 'hc' }
+          { label: 'محيط الرأس (سم)', type: 'number', role: 'hc' },
+          { label: 'المئين للوزن / الطول', type: 'text' },
+          { label: 'التغذية الحاليّة', type: 'text' },
+          { label: 'اللقاحات المستجدّة هذه الزيارة', type: 'text' }
         ]
       },
       'باطنية': {
@@ -5364,7 +5383,16 @@ if('serviceWorker'in navigator){window.addEventListener('load',function(){naviga
         ],
         visit: [
           { label: 'ضغط الدم (mmHg)', type: 'text', role: 'bp' },
+          { label: 'النبض (نبضة/دقيقة)', type: 'number' },
+          { label: 'الوزن (كغ)', type: 'number', role: 'weight' },
           { label: 'مستوى السكر في الدم (ملغ/دل)', type: 'number' },
+          { label: 'الخضاب السكّري HbA1c (%)', type: 'number' },
+          { label: 'صورة الدهون (كوليسترول / LDL / HDL / شحوم ثلاثية)', type: 'text' },
+          { label: 'وظائف الكلية (كرياتينين / بولة / eGFR)', type: 'text' },
+          { label: 'وظائف الكبد (ALT / AST)', type: 'text' },
+          { label: 'خضاب الدم Hb (غ/دل)', type: 'number' },
+          { label: 'هرمون الدرق TSH', type: 'number' },
+          { label: 'تحليل البول', type: 'text' },
           { label: 'نتائج الفحوصات المخبرية', type: 'textarea' },
           { label: 'نتائج الفحوصات الشعاعية', type: 'textarea' }
         ]
@@ -5376,9 +5404,19 @@ if('serviceWorker'in navigator){window.addEventListener('load',function(){naviga
         ],
         visit: [
           { label: 'ضغط الدم (mmHg)', type: 'text', role: 'bp' },
+          { label: 'النبض والنظم', type: 'text' },
+          { label: 'الوزن (كغ)', type: 'number', role: 'weight' },
+          { label: 'سكر الدم (ملغ/دل)', type: 'number' },
+          { label: 'صورة الدهون (LDL / HDL / شحوم ثلاثية)', type: 'text' },
+          { label: 'الوذمة المحيطيّة', type: 'select', options: ['لا', '+1', '+2', '+3'] },
+          { label: 'الاحتقان الوريدي الوداجي', type: 'checkbox' },
           { label: 'نتائج تخطيط القلب (ECG)', type: 'textarea' },
-          { label: 'نتائج إيكو القلب (Echo)', type: 'textarea' },
-          { label: 'اختبار الجهد', type: 'textarea' }
+          { label: 'نتائج إيكو القلب (Echo — EF% / الصمّامات)', type: 'textarea' },
+          { label: 'مراقبة هولتر (Holter)', type: 'textarea' },
+          { label: 'اختبار الجهد', type: 'textarea' },
+          { label: 'التروبونين', type: 'text' },
+          { label: 'BNP / NT-proBNP', type: 'text' },
+          { label: 'INR (لمن على مميّعات)', type: 'number' }
         ]
       },
       'جلدية': {
@@ -5391,7 +5429,11 @@ if('serviceWorker'in navigator){window.addEventListener('load',function(){naviga
           { label: 'وصف الآفة الجلدية', type: 'textarea' },
           { label: 'توزع الآفة', type: 'text' },
           { label: 'شكل الآفة الأولية', type: 'select', options: ['حطاطة', 'بثرة', 'حويصلة', 'فقاعة', 'بقعة', 'لويحة', 'عقدة', 'ورم'] },
-          { label: 'الحكة', type: 'checkbox' }
+          { label: 'الحكة', type: 'checkbox' },
+          { label: 'مساحة الجسم المصابة BSA (%)', type: 'number' },
+          { label: 'تنظير الجلد (Dermoscopy)', type: 'textarea' },
+          { label: 'نتيجة الخزعة / التنبيت الفطري', type: 'textarea' },
+          { label: 'الاستجابة للعلاج السابق', type: 'select', options: ['تحسّن', 'ثابت', 'تفاقم', 'أوّل زيارة'] }
         ]
       },
       'عظمية': {
@@ -5400,11 +5442,20 @@ if('serviceWorker'in navigator){window.addEventListener('load',function(){naviga
           { label: 'العمليات الجراحية العظمية', type: 'textarea' }
         ],
         visit: [
+          { label: 'المنطقة / المفصل المصاب', type: 'text' },
           { label: 'آلية الإصابة الحالية', type: 'textarea' },
           { label: 'وصف الألم', type: 'textarea' },
+          { label: 'شدّة الألم (VAS 0–10)', type: 'number' },
+          { label: 'المجال الحركي ROM (درجات)', type: 'text' },
+          { label: 'القوّة العضليّة (0–5)', type: 'text' },
+          { label: 'الحالة العصبيّة‑الوعائيّة للطرف', type: 'text' },
+          { label: 'اختبارات سريريّة نوعيّة', type: 'textarea' },
           { label: 'الوظيفة الحركية', type: 'textarea' },
+          { label: 'نوع التصوير', type: 'select', options: ['شعاعي بسيط', 'رنين مغناطيسي', 'طبقي محوري', 'إيكو', 'ومضان عظمي'] },
           { label: 'نتائج الأشعة', type: 'textarea' },
-          { label: 'العلاج الطبيعي', type: 'textarea' }
+          { label: 'حالة اللقاح الكزازي (للرضوض)', type: 'select', options: ['محدَّث', 'أُعطي اليوم', 'غير معروف'] },
+          { label: 'العلاج الطبيعي', type: 'textarea' },
+          { label: 'الخطة', type: 'select', options: ['تحفّظي', 'حقن موضعي', 'تجبير', 'جراحي'] }
         ]
       },
       'عيون': {
