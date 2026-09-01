@@ -1965,17 +1965,16 @@
       background: var(--primary);
       border-color: var(--primary);
       color: white;
-      box-shadow: 0 0 0 4px rgba(13,148,136,.15), var(--shadow);
-      transform: scale(1.1);
+      box-shadow: 0 0 0 3px var(--primary-faint);
     }
     .step-dot-wrapper.active .step-dot-label { color: var(--primary); }
     .step-dot.completed {
-      background: var(--green);
-      border-color: var(--green);
+      background: var(--primary);
+      border-color: var(--primary);
       color: white;
-      transform: scale(1);
     }
-    .step-dot-wrapper.completed .step-dot-label { color: var(--green); }
+    .step-dot-wrapper.completed .step-dot-label { color: var(--primary); }
+    .step-dot-connector.done { background: var(--primary); }
 
     .form-step { display: none; }
     .form-step.active { display: block; }
@@ -1983,10 +1982,20 @@
 
     .form-summary {
       background: var(--bg);
-      border: 1.5px solid var(--border);
-      border-radius: var(--radius-sm);
+      border: 1px solid var(--o08);
+      border-radius: 12px;
       padding: 14px;
     }
+    /* قائمة مراجعة الحجز — أسطر تسمية/قيمة بلا كرت */
+    .mf-review { display: flex; flex-direction: column; gap: 0; border-top: 1px solid var(--o08); }
+    .mf-review-row {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+      padding: 9px 2px; border-bottom: 1px solid var(--o06);
+    }
+    .mf-review-row .k { font-size: .78rem; color: var(--text-muted); font-weight: 600; flex-shrink: 0; }
+    .mf-review-row .v { font-size: .88rem; color: var(--text); font-weight: 700; text-align: end; word-break: break-word; }
+    .mf-review-row .v:empty::after,
+    .mf-review-row .v:not(:has(*)):empty::after { content: "—"; color: var(--text-muted); font-weight: 500; }
     .form-summary .text-gray-400 { color: var(--text-muted) !important; }
     .form-summary .text-white    { color: var(--text) !important; }
 
@@ -2398,8 +2407,8 @@
     }
     #manualFormPanel {
       background: var(--surface);
-      border: 1.5px solid var(--border);
-      border-radius: var(--radius-xl);
+      border: 1px solid var(--o08);
+      border-radius: 20px;
       box-shadow: var(--shadow-lg);
       width: 100%;
       max-width: 620px;
@@ -2409,6 +2418,11 @@
       position: relative;
       animation: panelSlideUp .25s cubic-bezier(.34,1.56,.64,1);
     }
+    /* رأس بسيط بلا أيقونة */
+    #manualFormPanel .mf-head-title { font-weight: 800; font-size: 1.02rem; color: var(--text); margin: 0; }
+    #manualFormPanel .mf-head-sub { font-size: .78rem; color: var(--text-muted); margin: 2px 0 0; }
+    /* رقم خطوة هادئ بدل الدائرة الملوّنة */
+    .o-step-n { font-weight: 800; font-size: .8rem; color: var(--primary); font-variant-numeric: tabular-nums; }
     @keyframes panelSlideUp {
       from { opacity: 0; transform: translateY(24px) scale(.97); }
       to   { opacity: 1; transform: translateY(0) scale(1); }
@@ -2426,34 +2440,40 @@
       #manualFormPanel .form-step-indicator { display: none; }
       /* Show ALL steps simultaneously */
       #manualFormPanel .form-step { display: block !important; }
-      /* 3-column grid */
+      /* ٣ أعمدة مفصولة بخطّ شعريّ — بلا كروت */
       #oDesktopGrid {
         display: grid;
         grid-template-columns: 1fr 1.5fr 1fr;
-        gap: 20px;
+        gap: 0;
         align-items: start;
       }
       /* Hide prev/next navigation buttons on desktop */
       #oNextToStep2, #oBackToStep1, #oNextToStep3, #oBackToStep2 { display: none !important; }
       /* Keep submit button visible */
       #oSubmitManualAppointment { display: flex !important; width: 100%; justify-content: center; }
-      /* Step column card style */
       .o-step-col {
-        background: var(--bg);
-        border: 1.5px solid var(--border);
-        border-radius: var(--radius-lg);
-        padding: 18px;
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        padding: 0 22px;
         display: flex;
         flex-direction: column;
         gap: 0;
       }
+      .o-step-col:first-child { padding-inline-start: 0; }
+      .o-step-col:last-child  { padding-inline-end: 0; }
+      .o-step-col + .o-step-col { border-inline-start: 1px solid var(--o08); }
       .o-step-col-title {
         display: flex !important;
         align-items: center;
         gap: 8px;
         margin-bottom: 16px;
-        padding-bottom: 12px;
-        border-bottom: 1.5px solid var(--border);
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--o08);
+        font-weight: 700;
+        font-size: .8rem;
+        color: var(--text-muted);
+        letter-spacing: .08em;
       }
       /* form-summary inside step 2 hidden on desktop — redundant */
       #overlayStep2 .form-summary { display: none; }

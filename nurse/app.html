@@ -36,7 +36,7 @@
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 
   <link rel="stylesheet" href="tokens.css?v=1">
-  <link rel="stylesheet" href="styles.css?v=79">
+  <link rel="stylesheet" href="styles.css?v=80">
 
   <!-- ═══════════════ PWA — DocBook ═══════════════ -->
   <meta name="theme-color" content="#0d9488" />
@@ -1447,12 +1447,9 @@
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
 
-      <div style="display:flex; align-items:center; gap:12px; margin-bottom:20px; padding-top:4px;">
-        <div class="card-icon"><i class="fas fa-pen-to-square"></i></div>
-        <div>
-          <div class="card-title">تسجيل موعد يدوي</div>
-          <div class="card-subtitle">للمرضى الذين يحجزون مباشرة في العيادة</div>
-        </div>
+      <div style="margin-bottom:20px; padding-top:2px;">
+        <p class="mf-head-title">تسجيل موعد يدوي</p>
+        <p class="mf-head-sub">للمرضى الذين يحجزون مباشرة في العيادة</p>
       </div>
 
       <!-- Step indicator (mobile only) -->
@@ -1478,10 +1475,7 @@
 
         <!-- ── COL 1: البيانات ── -->
         <div class="o-step-col">
-          <div class="o-step-col-title">
-            <div style="width:28px;height:28px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><span style="color:white;font-weight:800;font-size:.8rem;">1</span></div>
-            <span style="font-weight:700;font-size:.9rem;color:var(--text);">بيانات المريض</span>
-          </div>
+          <div class="o-step-col-title"><span class="o-step-n">١</span> بيانات المريض</div>
 
       <!-- Step 1 -->
       <div id="overlayStep1" class="form-step active">
@@ -1510,10 +1504,7 @@
 
         <!-- ── COL 2: الموعد ── -->
         <div class="o-step-col">
-          <div class="o-step-col-title">
-            <div style="width:28px;height:28px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><span style="color:white;font-weight:800;font-size:.8rem;">2</span></div>
-            <span style="font-weight:700;font-size:.9rem;color:var(--text);">اختيار الموعد</span>
-          </div>
+          <div class="o-step-col-title"><span class="o-step-n">٢</span> اختيار الموعد</div>
 
       <!-- Step 2 — Calendar Picker -->
       <div id="overlayStep2" class="form-step">
@@ -1557,7 +1548,7 @@
             <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
               <i class="fas fa-sun" style="color:#d97706; font-size:.75rem;"></i>
               <span style="font-weight:700; font-size:.78rem; color:var(--text);">الصباح</span>
-              <span id="oMorningCount" style="background:#fef3c7; color:#d97706; padding:1px 8px; border-radius:20px; font-size:.65rem; font-weight:700;">0</span>
+              <span id="oMorningCount" style="background:var(--o05); color:var(--text-muted); padding:1px 8px; border-radius:20px; font-size:.65rem; font-weight:700;">0</span>
             </div>
             <div id="oMorningPatients" style="display:flex; flex-direction:column; gap:5px;"></div>
           </div>
@@ -1567,7 +1558,7 @@
             <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
               <i class="fas fa-moon" style="color:#6366f1; font-size:.75rem;"></i>
               <span style="font-weight:700; font-size:.78rem; color:var(--text);">المساء</span>
-              <span id="oEveningCount" style="background:#ede9fe; color:#6366f1; padding:1px 8px; border-radius:20px; font-size:.65rem; font-weight:700;">0</span>
+              <span id="oEveningCount" style="background:var(--o05); color:var(--text-muted); padding:1px 8px; border-radius:20px; font-size:.65rem; font-weight:700;">0</span>
             </div>
             <div id="oEveningPatients" style="display:flex; flex-direction:column; gap:5px;"></div>
           </div>
@@ -1601,26 +1592,20 @@
 
         <!-- ── COL 3: التأكيد ── -->
         <div class="o-step-col">
-          <div class="o-step-col-title">
-            <div style="width:28px;height:28px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><span style="color:white;font-weight:800;font-size:.8rem;">3</span></div>
-            <span style="font-weight:700;font-size:.9rem;color:var(--text);">تأكيد الحجز</span>
-          </div>
+          <div class="o-step-col-title"><span class="o-step-n">٣</span> تأكيد الحجز</div>
 
       <!-- Step 3 -->
       <div id="overlayStep3" class="form-step">
-        <div style="background:var(--primary-light); border:1.5px solid var(--border-strong); border-radius:var(--radius); padding:18px; margin-bottom:16px;">
-          <h3 style="font-weight:700; font-size:.95rem; margin-bottom:12px; color:var(--primary);">تأكيد الحجز</h3>
-          <div style="display:flex; flex-direction:column; gap:8px; font-size:.88rem;">
-            <div style="display:flex; justify-content:space-between;"><span style="color:var(--text-muted);">الاسم:</span><span id="oConfirmPatientName" style="font-weight:600;"></span></div>
-            <div style="display:flex; justify-content:space-between;"><span style="color:var(--text-muted);">الهاتف:</span><span id="oConfirmPhone" style="font-weight:600;"></span></div>
-            <div style="display:flex; justify-content:space-between;"><span style="color:var(--text-muted);">النوع:</span><span id="oConfirmVisitType" style="font-weight:600;"></span></div>
-            <div style="display:flex; justify-content:space-between;"><span style="color:var(--text-muted);">التاريخ:</span><span id="oConfirmDate" style="font-weight:600;"></span></div>
-            <div style="display:flex; justify-content:space-between;"><span style="color:var(--text-muted);">الفترة:</span><span id="oConfirmSlot" style="font-weight:600;"></span></div>
-          </div>
+        <div class="mf-review" style="margin-bottom:16px;">
+          <div class="mf-review-row"><span class="k">الاسم</span><span class="v" id="oConfirmPatientName"></span></div>
+          <div class="mf-review-row"><span class="k">الهاتف</span><span class="v" id="oConfirmPhone"></span></div>
+          <div class="mf-review-row"><span class="k">النوع</span><span class="v" id="oConfirmVisitType"></span></div>
+          <div class="mf-review-row"><span class="k">التاريخ</span><span class="v" id="oConfirmDate"></span></div>
+          <div class="mf-review-row"><span class="k">الفترة</span><span class="v" id="oConfirmSlot"></span></div>
         </div>
         <div class="form-navigation">
           <button id="oBackToStep2" class="btn-secondary"><i class="fas fa-arrow-right"></i> السابق</button>
-          <button id="oSubmitManualAppointment" class="btn-primary btn-solid" style="background:linear-gradient(135deg,#059669,#10b981)!important;">تسجيل الموعد</button>
+          <button id="oSubmitManualAppointment" class="btn-primary btn-solid">تسجيل الموعد</button>
         </div>
       </div>
         </div><!-- /o-step-col 3 -->
