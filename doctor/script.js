@@ -7776,6 +7776,25 @@ if('serviceWorker'in navigator){window.addEventListener('load',function(){naviga
       console.log('[onboarding] فُتحت شاشة الإعداد للمعاينة — الإنهاء يحفظ الإعدادات من جديد.');
     };
 
+    /* اختبار «تخصيص الإضبارة» من الصفر: يمسح التخصّص والقوالب وعلامة الإعداد
+       (يحفظ الفراغ في settings/doctor + localStorage) ثم يفتح المعالج نظيفاً.
+       نداء من الـConsole:  resetOnboardingFresh()
+       ⚠️ أداة اختبار — تُحذف قبل التسليم. */
+    window.resetOnboardingFresh = function() {
+      if (typeof settings === 'undefined' || !settings) settings = {};
+      settings.specialty       = '';
+      settings.chartTemplate   = { patient: [], visit: [], dental: false };
+      settings.surgicalArchive = false;
+      settings.orthoArchive    = false;
+      settings.onboarded       = false;
+      settings.onboardedAt     = 0;
+      try { saveSettingsToLocal(settings); } catch (e) { console.error(e); }
+      if (typeof applySettings === 'function') try { applySettings(); } catch (e) {}
+      console.log('%c[onboarding] أُعيد ضبط تخصيص الإضبارة إلى الصفر — لا تخصّصات محفوظة.', 'color:#0d9488;font-weight:bold');
+      console.log('  • F5 لتظهر شاشة الإعداد من جديد تلقائياً، أو نادِ  openOnboarding()  الآن.');
+      if (typeof openOnboarding === 'function') openOnboarding();
+    };
+
     function openOnboarding() {
       var s = (typeof settings !== 'undefined' && settings) || {};
       var t = (s.chartTemplate && typeof s.chartTemplate === 'object') ? s.chartTemplate : {};
