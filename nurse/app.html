@@ -36,7 +36,7 @@
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 
   <link rel="stylesheet" href="tokens.css?v=1">
-  <link rel="stylesheet" href="styles.css?v=80">
+  <link rel="stylesheet" href="styles.css?v=81">
 
   <!-- ═══════════════ PWA — DocBook ═══════════════ -->
   <meta name="theme-color" content="#0d9488" />
@@ -1452,21 +1452,21 @@
         <p class="mf-head-sub">للمرضى الذين يحجزون مباشرة في العيادة</p>
       </div>
 
-      <!-- Step indicator (mobile only) -->
+      <!-- Step indicator (mobile only) — قائمة عموديّة بأسلوب بوتلي -->
       <div class="form-step-indicator" id="overlayStepIndicator">
         <div class="step-dot-wrapper active" id="overlayStep1Wrapper">
-          <div class="step-dot active" id="overlayStep1Dot">1</div>
-          <span class="step-dot-label">البيانات</span>
+          <div class="step-dot active" id="overlayStep1Dot">١</div>
+          <span class="step-dot-txt"><span class="step-dot-label">بيانات المريض</span><span class="step-dot-sub">الاسم والهاتف ونوع الزيارة</span></span>
         </div>
         <div class="step-dot-connector" id="overlayConnector1"></div>
         <div class="step-dot-wrapper" id="overlayStep2Wrapper">
-          <div class="step-dot" id="overlayStep2Dot">2</div>
-          <span class="step-dot-label">الموعد</span>
+          <div class="step-dot" id="overlayStep2Dot">٢</div>
+          <span class="step-dot-txt"><span class="step-dot-label">اختيار الموعد</span><span class="step-dot-sub">اختر اليوم ثمّ الوقت المتاح</span></span>
         </div>
         <div class="step-dot-connector" id="overlayConnector2"></div>
         <div class="step-dot-wrapper" id="overlayStep3Wrapper">
-          <div class="step-dot" id="overlayStep3Dot">3</div>
-          <span class="step-dot-label">تأكيد</span>
+          <div class="step-dot" id="overlayStep3Dot">٣</div>
+          <span class="step-dot-txt"><span class="step-dot-label">تأكيد الحجز</span><span class="step-dot-sub">راجِع التفاصيل ثمّ سجِّل</span></span>
         </div>
       </div>
 
@@ -1475,7 +1475,7 @@
 
         <!-- ── COL 1: البيانات ── -->
         <div class="o-step-col">
-          <div class="o-step-col-title"><span class="o-step-n">١</span> بيانات المريض</div>
+          <div class="o-step-col-title"><span class="mf-step-ind">١</span><span class="mf-step-txt"><b>بيانات المريض</b><i>الاسم ورقم الهاتف ونوع الزيارة</i></span></div>
 
       <!-- Step 1 -->
       <div id="overlayStep1" class="form-step active">
@@ -1504,7 +1504,7 @@
 
         <!-- ── COL 2: الموعد ── -->
         <div class="o-step-col">
-          <div class="o-step-col-title"><span class="o-step-n">٢</span> اختيار الموعد</div>
+          <div class="o-step-col-title"><span class="mf-step-ind">٢</span><span class="mf-step-txt"><b>اختيار الموعد</b><i>اختر اليوم ثمّ الوقت المتاح</i></span></div>
 
       <!-- Step 2 — Calendar Picker -->
       <div id="overlayStep2" class="form-step">
@@ -1592,7 +1592,7 @@
 
         <!-- ── COL 3: التأكيد ── -->
         <div class="o-step-col">
-          <div class="o-step-col-title"><span class="o-step-n">٣</span> تأكيد الحجز</div>
+          <div class="o-step-col-title"><span class="mf-step-ind">٣</span><span class="mf-step-txt"><b>تأكيد الحجز</b><i>راجِع التفاصيل ثمّ سجِّل الموعد</i></span></div>
 
       <!-- Step 3 -->
       <div id="overlayStep3" class="form-step">
@@ -1789,7 +1789,7 @@
   </div>
 
   <script src="config.js"></script>
-  <script src="script.js?v=76"></script>
+  <script src="script.js?v=77"></script>
   <!-- 🌊 خلفية متحرّكة (WebGL) — معطّلة حالياً؛ الخلفية النعناعية الثابتة مرسومة بـCSS في styles.css.
        لإرجاع المتحرّكة: أزل التعليق عن السطر التالي. -->
   <!-- <script src="bg-gradient.js?v=1"></script> -->

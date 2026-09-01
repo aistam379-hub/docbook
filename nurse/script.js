@@ -3668,11 +3668,12 @@
         const dot = document.getElementById(id);
         const wrapper = document.getElementById(id.replace('Dot','Wrapper'));
         const n = i + 1;
+        const ar = ['١','٢','٣'][i];
         dot.classList.remove('active','completed');
         if(wrapper) wrapper.classList.remove('active','completed');
         if (n < step) { dot.classList.add('completed'); dot.innerHTML = '<i class="fas fa-check" style="font-size:.75rem;"></i>'; if(wrapper) wrapper.classList.add('completed'); }
-        else if (n === step) { dot.classList.add('active'); dot.textContent = n; if(wrapper) wrapper.classList.add('active'); }
-        else dot.textContent = n;
+        else if (n === step) { dot.classList.add('active'); dot.textContent = ar; if(wrapper) wrapper.classList.add('active'); }
+        else dot.textContent = ar;
       });
       // Update connectors
       const c1 = document.getElementById('overlayConnector1');
