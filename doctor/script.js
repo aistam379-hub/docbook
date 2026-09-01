@@ -7762,7 +7762,9 @@ if('serviceWorker'in navigator){window.addEventListener('load',function(){naviga
         if (_obFlagged) {
           // تُستهلك مرّة واحدة: تحديث الصفحة بعدها لا يعيد الشاشة
           try { localStorage.removeItem(_OB_PREVIEW_KEY); } catch (e) {}
-          console.warn('[onboarding] معاينة بعد تسجيل الخروج — لن تتكرر عند تحديث الصفحة. أطفئ _OB_PREVIEW_AFTER_LOGOUT قبل التسليم.');
+          console.warn('[onboarding] معاينة بعد تسجيل الخروج — من الصفر (بلا تخصّصات محفوظة). أطفئ _OB_PREVIEW_AFTER_LOGOUT قبل التسليم.');
+          // ★ تجربة نظيفة تلقائيّة: امسح أيّ تخصيص محفوظ قبل فتح المعالج (بلا تدخّل من الـConsole)
+          if (typeof window.resetOnboardingFresh === 'function') { window.resetOnboardingFresh(); return; }
           openOnboarding();
           return;
         }
