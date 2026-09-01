@@ -2817,12 +2817,12 @@
 
     // ===== قائمة «مواعيد اليوم» المنبثقة من الشريط الجانبي =====
     window.closeTodayFlyout = function() {
-      var f = document.getElementById('todayFlyout'), b = document.getElementById('sidebarTodayBtn');
+      var f = document.getElementById('todayFlyout'), b = document.getElementById('apptTodayBtn');
       if (f) f.hidden = true;
       if (b) b.setAttribute('aria-expanded', 'false');
     };
     window.toggleTodayFlyout = function() {
-      var f = document.getElementById('todayFlyout'), b = document.getElementById('sidebarTodayBtn');
+      var f = document.getElementById('todayFlyout'), b = document.getElementById('apptTodayBtn');
       if (!f) return;
       var willOpen = f.hidden;
       f.hidden = !willOpen;
@@ -2830,9 +2830,10 @@
       if (willOpen && typeof renderTodayReminders === 'function') renderTodayReminders();
     };
     document.addEventListener('click', function(e) {
-      var li = document.getElementById('sidebarTodayBtn');
-      li = li && li.closest('li');
-      if (li && !li.contains(e.target)) window.closeTodayFlyout();
+      var btn = document.getElementById('apptTodayBtn');
+      var fly = document.getElementById('todayFlyout');
+      if (!btn || !fly || fly.hidden) return;
+      if (!btn.contains(e.target) && !fly.contains(e.target)) window.closeTodayFlyout();
     });
     document.addEventListener('keydown', function(e) { if (e.key === 'Escape') window.closeTodayFlyout(); });
 

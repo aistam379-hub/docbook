@@ -36,7 +36,7 @@
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 
   <link rel="stylesheet" href="tokens.css?v=1">
-  <link rel="stylesheet" href="styles.css?v=89">
+  <link rel="stylesheet" href="styles.css?v=92">
 
   <!-- ═══════════════ PWA — DocBook ═══════════════ -->
   <meta name="theme-color" content="#0d9488" />
@@ -253,16 +253,6 @@
           <li><button class="menu-item sidebar-item" id="sidebarCalendar" aria-label="الروزنامة">
             <i class="fas fa-calendar-alt"></i><span>الروزنامة</span>
           </button></li>
-          <li style="position:relative;">
-            <button class="menu-item" id="sidebarTodayBtn" onclick="toggleTodayFlyout()" aria-label="مواعيد اليوم" aria-haspopup="true" aria-expanded="false">
-              <span class="rail-badge rail-badge--count" id="todayRailBadge" style="display:none;">0</span>
-              <i class="fas fa-bell"></i><span>مواعيد اليوم</span>
-            </button>
-            <div class="today-flyout" id="todayFlyout" hidden>
-              <div class="today-flyout-head"><i class="fas fa-bell"></i> مواعيد اليوم <span id="todayFlyoutCount" class="today-flyout-count"></span></div>
-              <div class="today-flyout-list" id="todayFlyoutList"></div>
-            </div>
-          </li>
         </ul>
       </div>
 
@@ -316,6 +306,16 @@
 
       <!-- ========== APPOINTMENTS SECTION ========== -->
       <section id="appointmentsSection" class="hidden">
+
+        <!-- زرّ «مواعيد اليوم» + قائمته المنبثقة -->
+        <button class="appt-today-btn" id="apptTodayBtn" onclick="toggleTodayFlyout()" aria-label="مواعيد اليوم" aria-haspopup="true" aria-expanded="false">
+          <span class="rail-badge rail-badge--count" id="todayRailBadge" style="display:none;">0</span>
+          <i class="fas fa-bell"></i>
+        </button>
+        <div class="today-flyout" id="todayFlyout" hidden>
+          <div class="today-flyout-head"><i class="fas fa-bell"></i> مواعيد اليوم <span id="todayFlyoutCount" class="today-flyout-count"></span></div>
+          <div class="today-flyout-list" id="todayFlyoutList"></div>
+        </div>
 
         <!-- شريط التبويب = نوتش تركوازيّ معلّق -->
         <div class="appt-notch">
@@ -1793,7 +1793,7 @@
   </div>
 
   <script src="config.js"></script>
-  <script src="script.js?v=80"></script>
+  <script src="script.js?v=81"></script>
   <!-- 🌊 خلفية متحرّكة (WebGL) — معطّلة حالياً؛ الخلفية النعناعية الثابتة مرسومة بـCSS في styles.css.
        لإرجاع المتحرّكة: أزل التعليق عن السطر التالي. -->
   <!-- <script src="bg-gradient.js?v=1"></script> -->
