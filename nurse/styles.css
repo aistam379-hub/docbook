@@ -1280,9 +1280,9 @@
        APPOINTMENTS DUAL VIEW COLUMNS
        ============================================================ */
 
-    /* ═══ شريط تبويب المواعيد = «نوتش» تركوازيّ معلّق (بدل الحبّة البيضاء) ═══ */
+    /* ═══ شريط تبويب المواعيد = «نوتش» تركوازيّ معلّق من الحافّة العليا (بدل الحبّة البيضاء) ═══ */
     .appt-notch{
-      position:relative; margin:0 auto 18px; width:-moz-fit-content; width:fit-content;
+      position:relative; margin:-20px auto 12px; width:-moz-fit-content; width:fit-content;
       max-width:calc(100% - 120px);
       display:flex; gap:8px; align-items:center; flex-wrap:nowrap;
       padding:8px 16px;
@@ -1324,6 +1324,10 @@
       background:rgba(255,255,255,.28); color:#fff;
     }
     .appt-tab.active .appt-badge{ background:rgba(13,148,136,.15); color:var(--primary); }
+    @media (max-width:767px){
+      /* الموبايل: النوتش يلاصق أسفل الهيدر الأبيض (padding الجسم 14px) */
+      .appt-notch{ margin-top:-14px; }
+    }
     @media (max-width:560px){
       .appt-notch{ max-width:calc(100% - 28px); padding:7px 12px; gap:6px; }
       .appt-tab{ padding:7px 10px; font-size:.74rem; }
@@ -1340,16 +1344,20 @@
       display: none;
       flex-direction: column;
     }
+    /* الحاوية النشطة = «مسرح» رماديّ شفّاف يتدلّى منه النوتش — لا صندوق أبيض */
     #appointmentsDualView .glass-card.active {
       display: flex;
+      background: transparent !important;
+      border: none !important;
+      border-radius: 0;
+      box-shadow: none !important;
+      padding: 0;
     }
+    #appointmentsDualView .glass-card.active:hover { transform: none; box-shadow: none !important; }
 
-    /* ملء الارتفاع المتاح ليتمركز عنصر «لا توجد...» في منتصف الشاشة */
-    #appointmentsSection:not(.hidden) { display: flex; flex-direction: column; flex: 1 0 auto; }
-    #appointmentsDualView { flex: 1 0 auto; }
-    #appointmentsDualView .glass-card.active { flex: 1 0 auto; }
-    #pendingCardsContainer, #acceptedCardsContainer { flex: 1 0 auto; align-content: start; }
-    /* عند عدم وجود بطاقات: توسيط العنصر الفارغ عمودياً */
+    #appointmentsSection:not(.hidden) { display: flex; flex-direction: column; }
+    #pendingCardsContainer, #acceptedCardsContainer { align-content: start; }
+    /* حالة فارغة مضغوطة — لا وادي نصف شاشة */
     #pendingCardsContainer.is-empty, #acceptedCardsContainer.is-empty { align-content: center; }
 
     /* ============================================================

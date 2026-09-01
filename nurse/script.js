@@ -1599,9 +1599,9 @@
       pendingContainer.classList.toggle('is-empty', pending.length === 0);
       pendingContainer.innerHTML = pending.length
         ? pending.map(r=>appointmentCardHTML(r,'Pending')).join('')
-        : `<div style="grid-column:1/-1; display:flex; flex-direction:column; align-items:center; justify-content:center; width:100%; min-height:50vh; color:var(--text-muted); text-align:center;">
-            <i class="fas fa-check-circle" style="font-size:2.6rem; margin-bottom:12px; opacity:.4; color:var(--green);"></i>
-            <span style="font-size:.95rem; font-weight:600;">لا توجد طلبات جديدة</span></div>`;
+        : `<div style="grid-column:1/-1; display:flex; flex-direction:column; align-items:center; justify-content:center; width:100%; min-height:clamp(180px,30vh,280px); color:var(--text-muted); text-align:center;">
+            <i class="fas fa-check-circle" style="font-size:2.2rem; margin-bottom:10px; opacity:.4; color:var(--green);"></i>
+            <span style="font-size:.9rem; font-weight:600;">لا توجد طلبات جديدة</span></div>`;
 
       // --- Accepted --- (اليوم والمستقبل فقط)
       let accepted = allRecords.filter(r=>r.Status==='Accepted' && parseLocalISODate(normalizeDate(r.Date)) >= today).sort((a,b)=>(a.Date||'').localeCompare(b.Date||''));
@@ -1616,9 +1616,9 @@
       acceptedContainer.classList.toggle('is-empty', accepted.length === 0);
       acceptedContainer.innerHTML = accepted.length
         ? accepted.map(r=>appointmentCardHTML(r,'Accepted')).join('')
-        : `<div style="grid-column:1/-1; display:flex; flex-direction:column; align-items:center; justify-content:center; width:100%; min-height:50vh; color:var(--text-muted); text-align:center;">
-            <i class="fas fa-calendar-xmark" style="font-size:2.6rem; margin-bottom:12px; opacity:.4;"></i>
-            <span style="font-size:.95rem; font-weight:600;">لا توجد مواعيد مؤكدة</span></div>`;
+        : `<div style="grid-column:1/-1; display:flex; flex-direction:column; align-items:center; justify-content:center; width:100%; min-height:clamp(180px,30vh,280px); color:var(--text-muted); text-align:center;">
+            <i class="fas fa-calendar-xmark" style="font-size:2.2rem; margin-bottom:10px; opacity:.4;"></i>
+            <span style="font-size:.9rem; font-weight:600;">لا توجد مواعيد مؤكدة</span></div>`;
       updateApptNavDot();
     }
 
