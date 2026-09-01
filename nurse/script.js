@@ -1559,24 +1559,12 @@
         if (pendingCol)  pendingCol.classList.remove('active');
         if (acceptedCol) acceptedCol.classList.add('active');
       }
-      // Update inline tab bar
+      // النوتش: تبديل حالة التبويب بالكلاس لا بالستايل المضمّن
       const btnP = document.getElementById('apptTabBtnPending');
       const btnA = document.getElementById('apptTabBtnAccepted');
-      const bdgP = document.getElementById('apptBadgePending');
-      const bdgA = document.getElementById('apptBadgeAccepted');
-      const BASE = 'flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:9px 14px;border-radius:50px;border:none;cursor:pointer;font-family:inherit;font-weight:700;font-size:.82rem;transition:all .22s;';
       if (btnP && btnA) {
-        if (tab === 'pending') {
-          btnP.style.cssText = BASE + 'background:var(--primary);color:white;box-shadow:0 2px 12px rgba(13,148,136,.3);';
-          btnA.style.cssText = BASE + 'background:transparent;color:var(--text-muted);';
-          if (bdgP) { bdgP.style.background='rgba(255,255,255,.25)'; bdgP.style.color='white'; }
-          if (bdgA) { bdgA.style.background='var(--border)'; bdgA.style.color='var(--text-muted)'; }
-        } else {
-          btnA.style.cssText = BASE + 'background:var(--primary);color:white;box-shadow:0 2px 12px rgba(13,148,136,.3);';
-          btnP.style.cssText = BASE + 'background:transparent;color:var(--text-muted);';
-          if (bdgA) { bdgA.style.background='rgba(255,255,255,.25)'; bdgA.style.color='white'; }
-          if (bdgP) { bdgP.style.background='var(--border)'; bdgP.style.color='var(--text-muted)'; }
-        }
+        btnP.classList.toggle('active', tab === 'pending');
+        btnA.classList.toggle('active', tab === 'accepted');
       }
     };
 
