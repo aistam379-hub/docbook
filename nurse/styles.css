@@ -1388,16 +1388,18 @@
     [dir="rtl"] .search-icon { left: auto; right: 14px; }
     [dir="rtl"] .search-input { padding: 11px 44px 11px 16px; }
 
-    /* ── دفتر المرضى: شريط بحث + زرّ إضافة (+) فقط — بلا هيدر، متل الطبيب ── */
+    /* ── دفتر المرضى: زرّ «مريض جديد» + خانة بحث — بلا هيدر، متل الطبيب ── */
     .pb-toolbar{ display:flex; align-items:center; gap:12px; margin-bottom:18px; }
     .pb-add{
-      flex-shrink:0; width:52px; height:52px; border-radius:16px;
+      flex-shrink:0; height:52px; padding:0 18px; border-radius:16px;
       border:none; background:var(--primary); color:#fff; cursor:pointer;
-      display:flex; align-items:center; justify-content:center; font-size:1.05rem;
+      display:inline-flex; align-items:center; gap:8px; white-space:nowrap;
+      font-family:inherit; font-weight:800; font-size:.86rem;
       transition:background .15s, transform .1s;
     }
+    .pb-add i{ font-size:.9rem; color:#fff; }
     .pb-add:hover{ background:var(--primary-hover); }
-    .pb-add:active{ transform:scale(.95); }
+    .pb-add:active{ transform:scale(.97); }
     .pb-search-wrap{ flex:1; position:relative; min-width:0; }
     .pb-search-ico{
       position:absolute; left:18px; top:50%; transform:translateY(-50%);
@@ -1413,7 +1415,8 @@
     .pb-search::placeholder{ color:var(--text-muted); font-weight:400; }
     .pb-search:focus{ border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-faint); }
     @media (max-width:560px){
-      .pb-add{ width:46px; height:46px; }
+      .pb-add{ height:46px; padding:0 13px; font-size:.8rem; }
+      .pb-add span{ position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }  /* أيقونة فقط على الضيّق */
       .pb-search{ height:46px; }
     }
 
